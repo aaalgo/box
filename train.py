@@ -38,9 +38,7 @@ def create_boxnet (ft, gt_counts, gt_boxes, config):
     # ft:           B * H' * W' * 3     input feature, H' W' is feature map size
     # gt_counts:    B                   number of boxes in each sample of the batch
     # gt_boxes:     ? * 4               boxes
-    tf.variable_scope('boxnet'):
-
-        #ft = config.backbone(image)            # B * H' * W' * ?
+    with tf.variable_scope('boxnet'):
 
         logits = config.predict_logits(ft)     # B * H' * W' * (M * 2)
         logits = tf.reshape(logits, (-1, 2))   # ? * 2
@@ -224,7 +222,7 @@ def main (_):
     X = tf.placeholder(tf.float32, shape=(None, None, None, 3), name="images")
     X = X - PIXEL_MEANS
     # ground truth labels
-    GT_LABELS = tf.placeholder(tf.int32, shape=(None, None, None, 1))
+    # GT_LABELS = tf.placeholder(tf.int32, shape=(None, None, None, 1))
     GT_COUNTS = tf.placeholder(tf.int32, shape=(None,))
     GT_BOXES = tf.placeholder(tf.int32, shape=(None, None, None, 1))
     is_training = tf.placeholder(tf.bool, name="is_training")
