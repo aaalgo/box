@@ -28,8 +28,6 @@ class ShapeConfig:
         return slim.conv2d(ft, self.params * self.priors, 3, 1, activation_fn=None)
 
     def params_loss (self, params, gt_params):
-        print(tf.shape(params))
-        print(tf.shape(gt_params))
         diff = params - gt_params
         diff = diff * diff
         return tf.reduce_sum(diff, axis=1)
