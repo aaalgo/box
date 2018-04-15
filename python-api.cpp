@@ -1,18 +1,14 @@
-#define PY_ARRAY_UNIQUE_SYMBOL pbcvt_ARRAY_API
 #include <string>
 #include <vector>
 #include <sstream>
 #include <iostream>
 #include <boost/ref.hpp>
 #include <boost/python.hpp>
-#include <boost/python/make_constructor.hpp>
-#include <boost/python/raw_function.hpp>
+#include <boost/python/numpy.hpp>
 #include <opencv2/opencv.hpp>
-#include <pyboostcvconverter/pyboostcvconverter.hpp>
 #include <glog/logging.h>
-//#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
-//#include <numpy/ndarrayobject.h>
 using namespace boost::python;
+namespace np = boost::python::numpy;
 
 namespace {
     using std::istringstream;
@@ -23,168 +19,80 @@ namespace {
     using std::endl;
     using std::vector;
 
-    struct Circle {
-
-        static unsigned constexpr PARAMS= 3;
-
-        struct Shape {
-            float x, y, r;
-        };
-
-        static void update_shape (Shape *s, cv::Point_<float> const &pt, float const *params) {
-            s->x = pt.x + params[0];
-            s->y = pt.y + params[1];
-            s->r = params[2];
-
-        }
-        static void update_params (Shape const &c, float *params) {
-            params[0] = c.x;
-            params[1] = c.y;
-            params[2] = c.r;
-        }
-
-        static float overlap (Shape const &a, Shape const &b) {
-            float dx = a.x - b.x;
-            float dy = a.y - b.y;
-            float d = sqrt(dx * dx + dy * dy);
-            float r = std::max(a.r, b.r) + 1;
-            return  (r-d)/r;
-        }
-
-        static void draw (cv::Mat image, Shape const &c) {
-            int r = std::round(c.r);
-            int x = std::round(c.x);
-            int y = std::round(c.y);
-            cv::circle(image, cv::Point(x, y), r, cv::Scalar(255, 0, 0), 1);
-        }
-    };
-
-    struct Box {
-        static unsigned constexpr PARAMS= 4;
-
-        typedef cv::Rect_<float> Shape;
-
-        static void update_shape (Shape *s, cv::Point_<float> const &pt, float const *params) {
-            s->x = pt.x + params[0] - params[2]/2;
-            s->y = pt.y + params[1] - params[3]/2;
-            s->width = params[2];
-            s->height = params[3];
-        }
-
-        static float overlap (Shape const &s1, Shape const &s2) {
-            float o = (s1 & s2).area();
-            return o / (s1.area() + s2.area() - o +1);
-        }
-
-        static void update_params (Shape const &s, float *params) {
-            params[0] = s.x;
-            params[1] = s.y;
-            params[2] = s.x + s.width;
-            params[3] = s.y + s.height;
-        }
-
-        static void draw (cv::Mat image, Shape const &c) {
-            cv::rectangle(image, cv::Point(int(round(c.x)), int(round(c.y))),
-                                 cv::Point(int(round(c.x+c.width)), int(round(c.y+c.height))), 
-                                 cv::Scalar(255, 0, 0), 1);
-        }
-    };
-
-    template <typename SHAPE>
-    class ShapeProposal {
-        int upsize;
-        float pth;
-        float th;
-
-        struct Shape: public SHAPE::Shape {
-            float score;
-            float keep;
-        };
+    class AlignBoxes {
     public:
-        ShapeProposal (int up, float pth_, float th_): upsize(up), pth(pth_), th(th_) {
-        }
-
-        PyObject* apply (PyObject *prob_, PyObject *params_, PyObject *image_) {
-            cv::Mat prob(pbcvt::fromNDArrayToMat(prob_));
-            cv::Mat params(pbcvt::fromNDArrayToMat(params_));
-
-            CHECK(prob.type() == CV_32F);
-            //CHECK(params.type() == CV_32FC3);
-            CHECK(prob.rows == params.rows);
-            CHECK(prob.cols == params.cols);
-            //CHECK(prob.channels() == 1);
-            CHECK(params.channels() == SHAPE::PARAMS * prob.channels());
-            vector<Shape> all;
-            int priors = prob.channels();
-            for (int y = 0; y < prob.rows; ++y) {
-                float const *pl = prob.ptr<float const>(y);
-                float const *pp = params.ptr<float const>(y);
-                for (int x = 0; x < prob.cols; ++x) {
-                    cv::Point_<float> pt(x * upsize, y * upsize);
-                    for (int prior = 0; prior < priors; ++prior, ++pl, pp += SHAPE::PARAMS) {
-                        if (pl[0] < pth) continue;
-                        Shape c;
-                        SHAPE::update_shape(&c, pt, pp);
-                        c.score = pl[0];
-                        c.keep = true;
-                        all.push_back(c);
-                    }
-                }
-            }
-            sort(all.begin(), all.end(), [](Shape const &a, Shape const &b){return a.score > b.score;});
-
-            unsigned cnt = 0;
-            for (unsigned i = 0; i < all.size(); ++i) {
-                if (!all[i].keep) continue;
-                cnt += 1;
-                Shape const &a = all[i];
-                for (unsigned j = i+1; j < all.size(); ++j) {
-                    Shape &b = all[j];
-                    float d = SHAPE::overlap(a, b);
-                    if (d > th) {
-                       b.keep = false;
-                    }
-                }
-            }
-            cv::Mat result(cnt, SHAPE::PARAMS, CV_32F);
-            int next = 0;
-            for (auto const &c: all) {
-                if (!c.keep) continue;
-                float *r = result.ptr<float>(next++);
-                SHAPE::update_params(c, r);
-            }
-            CHECK(next == cnt);
-
-            if (image_ != Py_None) {
-                cv::Mat image = pbcvt::fromNDArrayToMat(image_);
-                for (auto const &c: all) {
-                    if (!c.keep) continue;
-                    SHAPE::draw(image, c);
-                }
-            }
-            return pbcvt::fromMatToNDArray(result);
+        list apply (np::ndarray gt_boxes, np::ndarray boxes) {
+            CHECK(gt_boxes.get_nd() == 2);
+            CHECK(boxes.get_nd() == 2);
+            CHECK(gt_boxes.shape(1) >= 3);
+            CHECK(boxes.shape(1) == 4);
+            list result;
+            return result;
         }
     };
-}
 
-int init_numpy()
-{
-    import_array();
-    return 0;
+    class MaskExtractor {
+        cv::Size sz;
+    public:
+        MaskExtractor (int width, int height): sz(width, height) {
+        }
+
+        np::ndarray apply (np::ndarray images,
+                    np::ndarray gt_boxes,
+                    np::ndarray boxes) {
+            CHECK(images.get_nd() == 4);
+            CHECK(gt_boxes.get_nd() == 2);
+            CHECK(boxes.get_nd() == 2);
+            CHECK(gt_boxes.shape(1) >= 3);
+            CHECK(boxes.shape(1) == 4);
+            CHECK(gt_boxes.shape(0) == boxes.shape(0));
+            int n = gt_boxes.shape(0);
+            int H = images.shape(1);
+            int W = images.shape(2);
+            int C = images.shape(3);
+            CHECK(C == 1);
+
+            np::ndarray masks = np::zeros(make_tuple(n, sz.height, sz.width, 1), np::dtype::get_builtin<float>());
+
+            for (int i = 0; i < n; ++i) {
+                float *gt_box = (float *)(gt_boxes.get_data() + i * gt_boxes.strides(0));
+                float *box = (float *)(boxes.get_data() + i * boxes.strides(0));
+                int index(gt_box[0]);
+                int tag(gt_box[2]);
+                cv::Mat image(H, W, CV_32F, images.get_data() + index * images.strides(0));
+                float *mask_begin =  (float *)(masks.get_data() + i * masks.strides(0));
+                float *mask_end = mask_begin + masks.strides(0);
+                cv::Mat mask(sz, CV_32F, mask_begin);
+
+                int x1 = int(round(box[0]));
+                int y1 = int(round(box[1]));
+                int x2 = int(round(box[2]));
+                int y2 = int(round(box[3]));
+                CHECK(x1 >= 0);
+                CHECK(y1 >= 0);
+                CHECK(x2 < W);
+                CHECK(y2 < H);
+                cv::Mat from(image(cv::Rect(x1, y1, x2-x1, y2-y1)));
+                cv::resize(from, mask, mask.size(), 0, 0, CV_INTER_NN);
+
+                for (float *p = mask_begin; p < mask_end; ++p) {
+                    if (p[0] == tag) p[0] = 1.0;
+                    else p[0] = 0.0;
+                }
+            }
+            return masks;
+        }
+    };
 }
 
 BOOST_PYTHON_MODULE(cpp)
 {
-	init_numpy();
-    scope().attr("__doc__") = "adsb4";
-    to_python_converter<cv::Mat,
-                     pbcvt::matToNDArrayBoostConverter>();
-    pbcvt::matFromNDArrayBoostConverter();
-    class_<ShapeProposal<Circle>>("CircleProposal", init<int, float, float>())
-        .def("apply", &ShapeProposal<Circle>::apply)
+    np::initialize();
+    class_<AlignBoxes>("AlignBoxes", init<>())
+        .def("apply", &AlignBoxes::apply)
     ;
-    class_<ShapeProposal<Box>>("BoxProposal", init<int, float, float>())
-        .def("apply", &ShapeProposal<Box>::apply)
+    class_<MaskExtractor>("MaskExtractor", init<int, int>())
+        .def("apply", &MaskExtractor::apply)
     ;
 }
 
