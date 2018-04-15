@@ -150,8 +150,6 @@ flags.DEFINE_boolean('adam', False, '')
 flags.DEFINE_float('pl_weight', 1.0/50, '')
 flags.DEFINE_float('re_weight', 0.1, '')
 
-flags.DEFINE_string('shape', 'circle', '')
-
 COLORSPACE = 'BGR'
 PIXEL_MEANS = tf.constant([[[[127.0, 127.0, 127.0]]]])
 VGG_PIXEL_MEANS = tf.constant([[[[103.94, 116.78, 123.68]]]])
@@ -213,7 +211,8 @@ def create_picpac_stream (db_path, is_training):
               "colorspace": COLORSPACE,
               "transforms": augments + [
                   {"type": "clip", "round": FLAGS.backbone_stride},
-                  {"type": "anchors.dense." + FLAGS.shape, 'downsize': FLAGS.ft_stride},
+                  {"type": "anchors.dense.box", 'downsize': FLAGS.ft_stride},
+                  {"type": "box_feature"},
                   {"type": "rasterize"},
                   ]
              }
