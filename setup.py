@@ -6,21 +6,21 @@ from distutils.core import setup, Extension
 
 libraries = []
 cv2libs = sp.check_output('pkg-config --libs opencv', shell=True).decode('ascii')
-cv_converter = 'pyboostcvconverter/src/pyboost_cv2_converter.cpp'
 if 'opencv_imgcodecs' in cv2libs:
     libraries.append('opencv_imgcodecs')
-    cv_converter = 'pyboostcvconverter/src/pyboost_cv3_converter.cpp'
     pass
 
 numpy_include = os.path.join(os.path.abspath(os.path.dirname(numpy.__file__)), 'core', 'include')
 
 if sys.version_info[0] < 3:
+    boost_numpy = 'boost_python'
     boost_python = 'boost_python'
 else:
+    boost_numpy = 'boost_numpy3'
     boost_python = 'boost_python-py%d%d' % (sys.version_info[0], sys.version_info[1])
     pass
 
-libraries.extend(['opencv_highgui', 'opencv_imgproc', 'opencv_core', 'boost_filesystem', 'boost_system', boost_python, 'glog'])
+libraries.extend(['opencv_highgui', 'opencv_imgproc', 'opencv_core', 'boost_filesystem', 'boost_system', boost_numpy, boost_python, 'glog'])
 
 cpp = Extension('cpp',
         language = 'c++',
@@ -29,7 +29,7 @@ cpp = Extension('cpp',
         libraries = libraries,
         library_dirs = ['/usr/local/lib'],
 
-        sources = ['python-api.cpp', cv_converter]
+        sources = ['python-api.cpp']
         )
 
 setup (name = 'cpp',
