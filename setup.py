@@ -20,7 +20,7 @@ else:
     boost_python = 'boost_python-py%d%d' % (sys.version_info[0], sys.version_info[1])
     pass
 
-libraries.extend(['opencv_highgui', 'opencv_imgproc', 'opencv_core', 'boost_filesystem', 'boost_system', boost_numpy, boost_python, 'glog'])
+libraries.extend(['opencv_highgui', 'opencv_imgproc', 'opencv_core', 'boost_filesystem', 'boost_system', boost_numpy, boost_python, 'glog', 'gomp'])
 
 cpp = Extension('cpp',
         language = 'c++',

@@ -259,37 +259,48 @@ def create_model (inputs, backbone_fn):
         boxes = tf.gather(boxes, sel)
         box_ind = tf.gather(box_ind, sel)
 
-        tf.py_func(xxx_print, [boxes], [tf.float32])
+        boxes_predicted = boxes
+        box_ind_predicted = box_ind
 
         index, gt_index = tf.py_func(gt_matcher.apply, [boxes, box_ind, inputs.gt_boxes], [tf.int32, tf.int32])
-        boxes = tf.gather(boxes, index)
-        box_ind = tf.gather(box_ind, index)
-        gt_boxes = tf.gather(inputs.gt_boxes, gt_index)
 
-        # mask_ft
-        # normalize boxes to [0-1]
-        nboxes = normalize_boxes(tf.shape(inputs.X), boxes)
-        mask_ft = tf.image.crop_and_resize(mask_ft, nboxes, box_ind, [FLAGS.mask_size, FLAGS.mask_size])
-        mlogits = slim.conv2d(mask_ft, 2, 3, 1, activation_fn=None) 
+        # % boxes found
+        precision = tf.cast(tf.shape(gt_index)[0], tf.float32) / tf.cast(tf.shape(boxes)[0] + 1, tf.float32);
+        recall = tf.cast(tf.shape(index)[0], tf.float32) / tf.cast(tf.shape(inputs.gt_boxes)[0] + 1, tf.float32);
 
-        gt_masks = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, boxes], [tf.float32])
-        gt_masks = tf.cast(tf.round(gt_masks), tf.int32)
-        # mask cross entropy
-        mxe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=mlogits, labels=gt_masks)
-        mxe = tf.reduce_mean(mxe)
+        if False:
+            boxes = tf.gather(boxes, index)
+            box_ind = tf.gather(box_ind, index)
+            gt_boxes = tf.gather(inputs.gt_boxes, gt_index)
+
+            # mask_ft
+            # normalize boxes to [0-1]
+            nboxes = normalize_boxes(tf.shape(inputs.X), boxes)
+            mask_ft = tf.image.crop_and_resize(mask_ft, nboxes, box_ind, [FLAGS.mask_size, FLAGS.mask_size])
+            mlogits = slim.conv2d(mask_ft, 2, 3, 1, activation_fn=None) 
+
+            gt_masks = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, boxes], [tf.float32])
+            gt_masks = tf.cast(tf.round(gt_masks), tf.int32)
+            # mask cross entropy
+            mxe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=mlogits, labels=gt_masks)
+            mxe = tf.reduce_mean(mxe)
+        else:
+            mxe = tf.constant(0, tf.float32)
 
     #tf.identity(logits, name='logits')
     #tf.identity(params, name='params')
-    #tf.identity(boxes, name='boxes')
+    tf.identity(boxes_predicted, name='boxes')
     #tf.identity(mlogits, name='mlogits')
-    axe = tf.identity(axe, name='axe') # cross-entropy
-    mxe = tf.identity(mxe, name='mxe') # cross-entropy
+    axe = tf.identity(axe, name='ax') # cross-entropy
+    mxe = tf.identity(mxe, name='mx') # cross-entropy
     pl = tf.identity(pl * FLAGS.pl_weight, name='pl') # params-loss
     reg = tf.identity(tf.reduce_sum(tf.losses.get_regularization_losses()) * FLAGS.re_weight, name='re')
+    precision = tf.identity(precision, name='p')
+    recall = tf.identity(recall, name='r')
 
     loss = tf.identity(axe + mxe + pl + reg, name='lo')
 
-    return loss, [loss, axe, mxe, pl, reg]
+    return loss, [loss, axe, mxe, pl, reg, precision, recall]
 
 def setup_finetune (ckpt, exclusions):
     print("Finetuning %s" % ckpt)
@@ -450,9 +461,9 @@ def main (_):
                 step += 1
                 pass
             stop = time.time()
-            msg = 'train epoch=%d step=%d ' % (epoch, step)
+            msg = 'train e=%d s=%d ' % (epoch, step)
             msg += metrics_txt
-            msg += ' elapsed=%.3f time=%.3f ' % (stop - global_start_time, stop - start_time)
+            msg += ' w=%.3f t=%.3f ' % (stop - global_start_time, stop - start_time)
             print_green(msg)
             logging.info(msg)
 

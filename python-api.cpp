@@ -46,8 +46,9 @@ namespace {
 
     class GTMatcher {
         float iou_th;
+        int batch;
     public:
-        GTMatcher (float th_): iou_th(th_) {
+        GTMatcher (float th_, int batch_): iou_th(th_), batch(batch_) {
         }
 
         list apply (np::ndarray boxes,
@@ -100,6 +101,9 @@ namespace {
             list r;
             np::ndarray idx1 = np::zeros(make_tuple(match.size()), np::dtype::get_builtin<int32_t>());
             np::ndarray idx2 = np::zeros(make_tuple(match.size()), np::dtype::get_builtin<int32_t>());
+            
+            //np::ndarray cnt = np::zeros(mask_tuple(
+
             int32_t *p1 = (int32_t *)idx1.get_data();
             int32_t *p2 = (int32_t *)idx2.get_data();
             for (auto const &p: match) {
