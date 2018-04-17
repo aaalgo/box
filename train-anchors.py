@@ -3,7 +3,7 @@ import os
 import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 sys.path.append(os.path.join(os.path.abspath(os.path.dirname(__file__)), 'models/research/slim'))
-sys.path.insert(0, 'picpac/build/lib.linux-x86_64-3.5')
+sys.path.insert(0, '../picpac/build/lib.linux-x86_64-3.5')
 import time
 import datetime
 import logging

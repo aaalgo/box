@@ -80,6 +80,7 @@ flags.DEFINE_integer('mask_stride', 1, '')
 flags.DEFINE_integer('mask_size', 128, '')
 flags.DEFINE_float('anchor_th', 0.5, '')
 flags.DEFINE_float('nms_th', 0.5, '')
+flags.DEFINE_integer('nms_max', 100, '')
 flags.DEFINE_float('match_th', 0.5, '')
 
 flags.DEFINE_string('backbone', 'resnet_v2_50', 'architecture')
@@ -113,6 +114,7 @@ class Inputs:
     def __init__ (self):
         self.X = tf.placeholder(tf.float32, shape=(None, None, None, 3), name="images")
         self.anchor_th = tf.placeholder(tf.float32, shape=(), name="anchor_th")
+        self.nms_max = tf.placeholder(tf.int32, shape=(), name="nms_max")
         self.nms_th = tf.placeholder(tf.float32, shape=(), name="nms_th")
         # gt_xxx groundtruth
         self.gt_masks = tf.placeholder(tf.int32, shape=(None, None, None, 1))
@@ -129,6 +131,7 @@ class Inputs:
         _, images, gt_masks_, gt_anchors_, gt_anchors_weight_, gt_params_, gt_params_weight_, gt_boxes_ = sample  # unpack picpac sample
         return {self.X: images,
                 self.anchor_th: FLAGS.anchor_th,
+                self.nms_max: FLAGS.nms_max,
                 self.nms_th: FLAGS.nms_th,
                 self.gt_masks: gt_masks_,
                 self.gt_anchors: gt_anchors_,
@@ -156,8 +159,8 @@ def anchors2boxes (shape, anchor_params):
         y0 = tf.tile(tf_repeat(y0, [len(PRIORS)]), [B])
     dx, dy, w, h = [tf.squeeze(x, axis=1) for x in tf.split(anchor_params, [1,1,1,1], 1)]
 
-    W = tf.cast(W, tf.float32)
-    H = tf.cast(H, tf.float32)
+    W = tf.cast(W * FLAGS.anchor_stride, tf.float32)
+    H = tf.cast(H * FLAGS.anchor_stride, tf.float32)
 
     max_X = W-1
     max_Y = H-1
@@ -196,6 +199,12 @@ def shift_boxes (boxes, box_ind):
 def xxx_print (array):
     print(array)
     return np.zeros([1], dtype=np.float32)
+
+def mask_net (net):
+    net = slim.conv2d(net, 64, 3, 1, scope='masknet1', reuse=tf.AUTO_REUSE)
+    net = slim.conv2d(net, 64, 3, 1, scope='masknet2', reuse=tf.AUTO_REUSE)
+    net = slim.conv2d(net, 2, 3, 1, activation_fn=None, scope='masknet3', reuse=tf.AUTO_REUSE)
+    return net
 
 def create_model (inputs, backbone_fn):
     #box_ft, mask_ft, gt_masks, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, gt_boxes, config):
@@ -243,6 +252,7 @@ def create_model (inputs, backbone_fn):
 
         # generate boxes from anchor params
         boxes, box_ind = anchors2boxes(tf.shape(anchor_ft), params)
+        boxes_pre = boxes
 
         sel = tf.greater_equal(anchor_prob, inputs.anchor_th)
         # sel is a boolean mask
@@ -252,7 +262,7 @@ def create_model (inputs, backbone_fn):
         boxes = tf.boolean_mask(boxes, sel)
         box_ind = tf.boolean_mask(box_ind, sel)
 
-        sel = tf.image.non_max_suppression(shift_boxes(boxes, box_ind), anchor_prob, 10000, iou_threshold=inputs.nms_th)
+        sel = tf.image.non_max_suppression(shift_boxes(boxes, box_ind), anchor_prob, inputs.nms_max, iou_threshold=inputs.nms_th)
         # sel is a list of indices
 
         anchor_prob = None  # discard
@@ -262,34 +272,40 @@ def create_model (inputs, backbone_fn):
         boxes_predicted = boxes
         box_ind_predicted = box_ind
 
+        if True:    # prediction head, not used in training
+            nboxes = normalize_boxes(tf.shape(inputs.X), boxes_predicted)
+            mlogits = mask_net(tf.image.crop_and_resize(mask_ft, nboxes, box_ind_predicted, [FLAGS.mask_size, FLAGS.mask_size]))
+            masks_predicted = tf.squeeze(tf.slice(tf.nn.softmax(mlogits), [0, 0, 0, 1], [-1, -1, -1, 1]), 3)
+            pass
+
         index, gt_index = tf.py_func(gt_matcher.apply, [boxes, box_ind, inputs.gt_boxes], [tf.int32, tf.int32])
+
 
         # % boxes found
         precision = tf.cast(tf.shape(gt_index)[0], tf.float32) / tf.cast(tf.shape(boxes)[0] + 1, tf.float32);
         recall = tf.cast(tf.shape(index)[0], tf.float32) / tf.cast(tf.shape(inputs.gt_boxes)[0] + 1, tf.float32);
 
-        if False:
-            boxes = tf.gather(boxes, index)
-            box_ind = tf.gather(box_ind, index)
-            gt_boxes = tf.gather(inputs.gt_boxes, gt_index)
+        boxes = tf.gather(boxes, index)
+        box_ind = tf.gather(box_ind, index)
+        gt_boxes = tf.gather(inputs.gt_boxes, gt_index)
 
-            # mask_ft
-            # normalize boxes to [0-1]
-            nboxes = normalize_boxes(tf.shape(inputs.X), boxes)
-            mask_ft = tf.image.crop_and_resize(mask_ft, nboxes, box_ind, [FLAGS.mask_size, FLAGS.mask_size])
-            mlogits = slim.conv2d(mask_ft, 2, 3, 1, activation_fn=None) 
+        # mask_ft
+        # normalize boxes to [0-1]
+        nboxes = normalize_boxes(tf.shape(inputs.X), boxes)
+        mask_ft = tf.image.crop_and_resize(mask_ft, nboxes, box_ind, [FLAGS.mask_size, FLAGS.mask_size])
+        mlogits = mask_net(mask_ft)
 
-            gt_masks = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, boxes], [tf.float32])
-            gt_masks = tf.cast(tf.round(gt_masks), tf.int32)
-            # mask cross entropy
-            mxe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=mlogits, labels=gt_masks)
-            mxe = tf.reduce_mean(mxe)
-        else:
-            mxe = tf.constant(0, tf.float32)
+        gt_masks = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, boxes], [tf.float32])
+        gt_masks = tf.cast(tf.round(gt_masks), tf.int32)
+        # mask cross entropy
+        mxe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=mlogits, labels=gt_masks)
+        mxe = tf.reduce_mean(mxe)
 
     #tf.identity(logits, name='logits')
     #tf.identity(params, name='params')
+    tf.identity(boxes_pre, name='boxes_pre')
     tf.identity(boxes_predicted, name='boxes')
+    tf.identity(masks_predicted, name='masks')
     #tf.identity(mlogits, name='mlogits')
     axe = tf.identity(axe, name='ax') # cross-entropy
     mxe = tf.identity(mxe, name='mx') # cross-entropy
