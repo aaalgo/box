@@ -80,8 +80,8 @@ flags.DEFINE_integer('mask_stride', 1, '')
 flags.DEFINE_integer('mask_size', 128, '')
 flags.DEFINE_float('anchor_th', 0.5, '')
 flags.DEFINE_float('nms_th', 0.5, '')
-flags.DEFINE_integer('nms_max', 100, '')
 flags.DEFINE_float('match_th', 0.5, '')
+flags.DEFINE_integer('max_masks', 500, '')
 
 flags.DEFINE_string('backbone', 'resnet_v2_50', 'architecture')
 flags.DEFINE_string('model', None, 'model directory')
@@ -131,7 +131,7 @@ class Inputs:
         _, images, gt_masks_, gt_anchors_, gt_anchors_weight_, gt_params_, gt_params_weight_, gt_boxes_ = sample  # unpack picpac sample
         return {self.X: images,
                 self.anchor_th: FLAGS.anchor_th,
-                self.nms_max: FLAGS.nms_max,
+                self.nms_max: 1,
                 self.nms_th: FLAGS.nms_th,
                 self.gt_masks: gt_masks_,
                 self.gt_anchors: gt_anchors_,
@@ -213,7 +213,7 @@ def create_model (inputs, backbone_fn):
     # gt_boxes:     ? * 4               boxes
     bb, _ = backbone_fn(inputs.X-PIXEL_MEANS, global_pool=False, output_stride=FLAGS.backbone_stride)
 
-    gt_matcher = cpp.GTMatcher(FLAGS.match_th)
+    gt_matcher = cpp.GTMatcher(FLAGS.match_th, FLAGS.max_masks)
     mask_extractor = cpp.MaskExtractor(FLAGS.mask_size, FLAGS.mask_size)
 
     with tf.variable_scope('boxnet'):
@@ -262,28 +262,30 @@ def create_model (inputs, backbone_fn):
         boxes = tf.boolean_mask(boxes, sel)
         box_ind = tf.boolean_mask(box_ind, sel)
 
-        sel = tf.image.non_max_suppression(shift_boxes(boxes, box_ind), anchor_prob, inputs.nms_max, iou_threshold=inputs.nms_th)
+        sel = tf.image.non_max_suppression(shift_boxes(boxes, box_ind), anchor_prob, 100000, iou_threshold=inputs.nms_th)
         # sel is a list of indices
 
-        anchor_prob = None  # discard
-        boxes = tf.gather(boxes, sel)
-        box_ind = tf.gather(box_ind, sel)
-
-        boxes_predicted = boxes
-        box_ind_predicted = box_ind
-
         if True:    # prediction head, not used in training
+            psel = tf.slice(sel, [0], [tf.minimum(inputs.nms_max, tf.shape(sel)[0])])
+            boxes_predicted = tf.gather(boxes, psel)
+            box_ind_predicted = tf.gather(box_ind, psel)
+
             nboxes = normalize_boxes(tf.shape(inputs.X), boxes_predicted)
             mlogits = mask_net(tf.image.crop_and_resize(mask_ft, nboxes, box_ind_predicted, [FLAGS.mask_size, FLAGS.mask_size]))
             masks_predicted = tf.squeeze(tf.slice(tf.nn.softmax(mlogits), [0, 0, 0, 1], [-1, -1, -1, 1]), 3)
             pass
 
-        index, gt_index = tf.py_func(gt_matcher.apply, [boxes, box_ind, inputs.gt_boxes], [tf.int32, tf.int32])
+        anchor_prob = None  # discard
+        boxes = tf.gather(boxes, sel)
+        box_ind = tf.gather(box_ind, sel)
+
+
+        hit, index, gt_index = tf.py_func(gt_matcher.apply, [boxes, box_ind, inputs.gt_boxes], [tf.float32, tf.int32, tf.int32])
 
 
         # % boxes found
-        precision = tf.cast(tf.shape(gt_index)[0], tf.float32) / tf.cast(tf.shape(boxes)[0] + 1, tf.float32);
-        recall = tf.cast(tf.shape(index)[0], tf.float32) / tf.cast(tf.shape(inputs.gt_boxes)[0] + 1, tf.float32);
+        precision = hit / tf.cast(tf.shape(boxes)[0] + 1, tf.float32);
+        recall = hit / tf.cast(tf.shape(inputs.gt_boxes)[0] + 1, tf.float32);
 
         boxes = tf.gather(boxes, index)
         box_ind = tf.gather(box_ind, index)
@@ -299,7 +301,8 @@ def create_model (inputs, backbone_fn):
         gt_masks = tf.cast(tf.round(gt_masks), tf.int32)
         # mask cross entropy
         mxe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=mlogits, labels=gt_masks)
-        mxe = tf.reduce_mean(mxe)
+        mxe = tf.reshape(mxe, (-1, ))
+        mxe = tf.reduce_sum(mxe) / tf.cast(tf.shape(mxe)[0] + 1, tf.float32)
 
     #tf.identity(logits, name='logits')
     #tf.identity(params, name='params')
@@ -377,7 +380,7 @@ def create_picpac_stream (db_path, is_training):
                   {"type": "clip", "round": FLAGS.backbone_stride},
                   {"type": "anchors.dense.box", 'downsize': FLAGS.anchor_stride},
                   {"type": "box_feature"},
-                  {"type": "rasterize"},
+                  {"type": "rasterize", "use_tag": True, "dtype": "float32"},
                   ]
              }
     if is_training and not FLAGS.mixin is None:

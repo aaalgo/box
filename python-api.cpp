@@ -46,9 +46,9 @@ namespace {
 
     class GTMatcher {
         float iou_th;
-        int batch;
+        int max;
     public:
-        GTMatcher (float th_, int batch_): iou_th(th_), batch(batch_) {
+        GTMatcher (float th_, int max_): iou_th(th_), max(max_) {
         }
 
         list apply (np::ndarray boxes,
@@ -97,8 +97,15 @@ namespace {
                     used[best] = true;
                 }
             }
+            if (match.size() > max) {
+                std::random_shuffle(match.begin(), match.end());
+                match.resize(max);
+            }
 
             list r;
+            np::ndarray cnt = np::zeros(make_tuple(), np::dtype::get_builtin<float>());
+            *(float *)cnt.get_data() = match.size();
+
             np::ndarray idx1 = np::zeros(make_tuple(match.size()), np::dtype::get_builtin<int32_t>());
             np::ndarray idx2 = np::zeros(make_tuple(match.size()), np::dtype::get_builtin<int32_t>());
             
@@ -112,6 +119,7 @@ namespace {
                 ++p1;
                 ++p2;
             }
+            r.append(cnt);
             r.append(idx1);
             r.append(idx2);
             return r;
@@ -176,7 +184,7 @@ namespace {
 BOOST_PYTHON_MODULE(cpp)
 {
     np::initialize();
-    class_<GTMatcher>("GTMatcher", init<float>())
+    class_<GTMatcher>("GTMatcher", init<float, int>())
         .def("apply", &GTMatcher::apply)
     ;
     class_<MaskExtractor>("MaskExtractor", init<int, int>())
