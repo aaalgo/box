@@ -127,7 +127,7 @@ namespace {
                 int tag(gt_box[2]);
                 cv::Mat image(H, W, CV_32F, images.get_data() + index * images.strides(0));
                 float *mask_begin =  (float *)(masks.get_data() + i * masks.strides(0));
-                float *mask_end = mask_begin + masks.strides(0);
+                float *mask_end =  (float *)(masks.get_data() + (i+1) * masks.strides(0));
                 cv::Mat mask(sz, CV_32F, mask_begin);
 
                 int x1 = int(round(box[0]));
@@ -138,13 +138,13 @@ namespace {
                 CHECK(y1 >= 0);
                 CHECK(x2 < W);
                 CHECK(y2 < H);
-                cv::Mat from(image(cv::Rect(x1, y1, x2-x1, y2-y1)));
-                cv::resize(from, mask, mask.size(), 0, 0, CV_INTER_NN);
-
-                for (float *p = mask_begin; p < mask_end; ++p) {
+                cv::Mat roi(image(cv::Rect(x1, y1, x2-x1+1, y2-y1+1)));
+                cv::Mat from = roi.clone();
+                for (float *p = from.ptr<float>(0); p < from.ptr<float>(from.rows); ++p) {
                     if (p[0] == tag) p[0] = 1.0;
                     else p[0] = 0.0;
                 }
+                cv::resize(from, mask, mask.size(), 0, 0);
             }
             return masks;
         }
