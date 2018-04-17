@@ -24,7 +24,7 @@ libraries.extend(['opencv_highgui', 'opencv_imgproc', 'opencv_core', 'boost_file
 
 cpp = Extension('cpp',
         language = 'c++',
-        extra_compile_args = ['-O3', '-std=c++1y', '-g'], 
+        extra_compile_args = ['-O3', '-std=c++1y', '-g', '-fopenmp'], 
 		include_dirs = ['/usr/local/include', numpy_include],
         libraries = libraries,
         library_dirs = ['/usr/local/lib'],

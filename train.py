@@ -145,6 +145,7 @@ def anchors2boxes (shape, anchor_params):
     B = shape[0]
     H = shape[1]
     W = shape[2]
+    box_ind = tf_repeat(tf.range(B), [H * W * len(PRIORS)])
     if True:    # generate array of box centers
         x0 = tf.cast(tf.range(W) * FLAGS.anchor_stride, tf.float32)
         y0 = tf.cast(tf.range(H) * FLAGS.anchor_stride, tf.float32)
@@ -155,19 +156,26 @@ def anchors2boxes (shape, anchor_params):
         y0 = tf.tile(tf_repeat(y0, [len(PRIORS)]), [B])
     dx, dy, w, h = [tf.squeeze(x, axis=1) for x in tf.split(anchor_params, [1,1,1,1], 1)]
 
+    W = tf.cast(W, tf.float32)
+    H = tf.cast(H, tf.float32)
+
+    max_X = W-1
+    max_Y = H-1
+
+    w = tf.clip_by_value(w, 0, W)
+    h = tf.clip_by_value(h, 0, H)
+
     x1 = x0 + dx - w/2
     y1 = y0 + dy - h/2
     x2 = x1 + w
     y2 = y1 + h
-    max_X = tf.cast(W-1, tf.float32)
-    max_Y = tf.cast(H-1, tf.float32)
     x1 = tf.clip_by_value(x1, 0, max_X) 
     y1 = tf.clip_by_value(y1, 0, max_Y)
     x2 = tf.clip_by_value(x2, 0, max_X)
     y2 = tf.clip_by_value(y2, 0, max_Y)
 
     boxes = tf.stack([x1, y1, x2, y2], axis=1)
-    return boxes, tf_repeat(tf.range(B), [H * W * len(PRIORS)])
+    return boxes, box_ind
 
 def normalize_boxes (shape, boxes):
     H = shape[1]
@@ -185,6 +193,9 @@ def shift_boxes (boxes, box_ind):
     assert FLAGS.batch == 1
     return boxes
 
+def xxx_print (array):
+    print(array)
+    return np.zeros([1], dtype=np.float32)
 
 def create_model (inputs, backbone_fn):
     #box_ft, mask_ft, gt_masks, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, gt_boxes, config):
@@ -248,6 +259,8 @@ def create_model (inputs, backbone_fn):
         boxes = tf.gather(boxes, sel)
         box_ind = tf.gather(box_ind, sel)
 
+        tf.py_func(xxx_print, [boxes], [tf.float32])
+
         index, gt_index = tf.py_func(gt_matcher.apply, [boxes, box_ind, inputs.gt_boxes], [tf.int32, tf.int32])
         boxes = tf.gather(boxes, index)
         box_ind = tf.gather(box_ind, index)
@@ -255,19 +268,20 @@ def create_model (inputs, backbone_fn):
 
         # mask_ft
         # normalize boxes to [0-1]
-        nboxes = normalize_boxes(inputs.X, boxes)
+        nboxes = normalize_boxes(tf.shape(inputs.X), boxes)
         mask_ft = tf.image.crop_and_resize(mask_ft, nboxes, box_ind, [FLAGS.mask_size, FLAGS.mask_size])
         mlogits = slim.conv2d(mask_ft, 2, 3, 1, activation_fn=None) 
 
-        gt_masks = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, boxes], [tf.int32])
+        gt_masks = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, boxes], [tf.float32])
+        gt_masks = tf.cast(tf.round(gt_masks), tf.int32)
         # mask cross entropy
         mxe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=mlogits, labels=gt_masks)
         mxe = tf.reduce_mean(mxe)
 
-    tf.identity(logits, name='logits')
-    tf.identity(params, name='params')
-    tf.identity(boxes, name='boxes')
-    tf.identity(mlogits, name='mlogits')
+    #tf.identity(logits, name='logits')
+    #tf.identity(params, name='params')
+    #tf.identity(boxes, name='boxes')
+    #tf.identity(mlogits, name='mlogits')
     axe = tf.identity(axe, name='axe') # cross-entropy
     mxe = tf.identity(mxe, name='mxe') # cross-entropy
     pl = tf.identity(pl * FLAGS.pl_weight, name='pl') # params-loss
@@ -428,8 +442,9 @@ def main (_):
             for _ in progress:
                 sample = stream.next()
                 mm, _ = sess.run([metrics, train_op], feed_dict=inputs.feed_dict(sample, True))
-                metrics_sum += np.array(mm) * images.shape[0]
-                cnt += images.shape[0]
+                bs = sample[1].shape[0]
+                metrics_sum += np.array(mm) * bs
+                cnt += bs
                 metrics_txt = format_metrics(metrics_sum/cnt)
                 progress.set_description(metrics_txt)
                 step += 1

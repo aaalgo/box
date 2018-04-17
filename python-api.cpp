@@ -23,6 +23,17 @@ namespace {
         return (b[2] - b[0]) * (b[3] - b[1]);
     }
 
+    /*
+    float box_iarea (float const *b1, float const *b2) {
+        float ibox[] = {std::max(b1[0], b2[0]),
+                        std::max(b1[1], b2[1]),
+                        std::min(b1[2], b2[2]),
+                        std::min(b1[3], b2[3])};
+        std::cerr << "AAA " << ibox[0] << " " << ibox[1] << " " << ibox[2] << " " << ibox[3] << std::endl;
+        return box_area(ibox);
+    }
+    */
+
     float iou_score (float const *b1, float const *b2) {
         float ibox[] = {std::max(b1[0], b2[0]),
                         std::max(b1[1], b2[1]),
@@ -75,6 +86,12 @@ namespace {
                     }
                 }
                 if (best >= 0) {
+                    /*
+                    float const *b = (float const *)(boxes.get_data() + boxes.strides(0) * best);
+                    std::cerr << "YYY " << iou << ' ' << b[0] << ' ' << b[1] << ' ' << b[2] << ' ' << b[3] << std::endl;
+                    float ia = box_iarea(gt, b);
+                    std::cerr << iou_score(gt, b) << "  " << ia << "    " << box_area(gt) << "    " << box_area(b) << std::endl;
+                    */
                     match.emplace_back(best, i);
                     used[best] = true;
                 }
@@ -120,6 +137,7 @@ namespace {
 
             np::ndarray masks = np::zeros(make_tuple(n, sz.height, sz.width, 1), np::dtype::get_builtin<float>());
 
+#pragma omp parallel for
             for (int i = 0; i < n; ++i) {
                 float *gt_box = (float *)(gt_boxes.get_data() + i * gt_boxes.strides(0));
                 float *box = (float *)(boxes.get_data() + i * boxes.strides(0));
@@ -127,7 +145,6 @@ namespace {
                 int tag(gt_box[2]);
                 cv::Mat image(H, W, CV_32F, images.get_data() + index * images.strides(0));
                 float *mask_begin =  (float *)(masks.get_data() + i * masks.strides(0));
-                float *mask_end =  (float *)(masks.get_data() + (i+1) * masks.strides(0));
                 cv::Mat mask(sz, CV_32F, mask_begin);
 
                 int x1 = int(round(box[0]));
@@ -138,8 +155,9 @@ namespace {
                 CHECK(y1 >= 0);
                 CHECK(x2 < W);
                 CHECK(y2 < H);
-                cv::Mat roi(image(cv::Rect(x1, y1, x2-x1+1, y2-y1+1)));
-                cv::Mat from = roi.clone();
+                cv::Rect roi(x1, y1, x2-x1+1, y2-y1+1);
+                //std::cerr << "XXX " << roi.x << ' ' << roi.y << ' ' << roi.width << ' ' << roi.height << std::endl;
+                cv::Mat from = image(roi).clone();
                 for (float *p = from.ptr<float>(0); p < from.ptr<float>(from.rows); ++p) {
                     if (p[0] == tag) p[0] = 1.0;
                     else p[0] = 0.0;
