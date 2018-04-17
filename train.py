@@ -15,77 +15,6 @@ from nets import nets_factory, resnet_utils
 import picpac
 import cpp
 
-class ShapeConfig:
-    def __init__ (self, params=3, priors=1):
-        self.params = params    # number of shape parameters
-        self.priors = priors    # number of priors
-        pass
-
-    def predict_logits (self, ft):
-        return slim.conv2d(ft, 2 * self.priors, 3, 1, activation_fn=None) 
-
-    # these are just box deltas
-    def predict_params (self, ft):
-        return slim.conv2d(ft, self.params * self.priors, 3, 1, activation_fn=None)
-
-    def predict_masks (self, ft, boxes):
-        # works with only one image for now
-        return None
-
-    def params_loss (self, params, gt_params):
-        diff = params - gt_params
-        diff = diff * diff
-        return tf.reduce_sum(diff, axis=1)
-    pass
-
-def create_net (ft, gt_masks, gt_labels, gt_labels_weight, gt_params, gt_params_weight, gt_boxes, config):
-    # ft:           B * H' * W' * 3     input feature, H' W' is feature map size
-    # gt_counts:    B                   number of boxes in each sample of the batch
-    # gt_boxes:     ? * 4               boxes
-    box_aligner = cpp.BoxAligner()
-    mask_extractor = cpp.MaskExtractor(128, 128)
-    with tf.variable_scope('anchor_net'):
-
-        logits = config.predict_logits(ft)     # B * H' * W' * (M * 2)
-        logits2 = tf.reshape(logits, (-1, 2))   # ? * 2
-
-        gt_labels = tf.reshape(gt_labels, (-1, ))
-        gt_labels_weight = tf.reshape(gt_labels_weight, (-1,))
-        xe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits2, labels=gt_labels)
-        xe = xe * gt_labels_weight
-        xe = tf.reduce_sum(xe) / (tf.reduce_sum(gt_labels_weight) + 1)
-
-        params = config.predict_params(ft)       # B * H' * W' * M * 4
-        params2 = tf.reshape(params, (-1, config.params))     # ? * 4
-        gt_params = tf.reshape(gt_params, (-1, config.params))
-        gt_params_weight = tf.reshape(gt_params_weight, (-1,))
-        pl = config.params_loss(params2, gt_params)
-        pl = pl * gt_params_weight
-        pl = tf.reduce_sum(pl) / (tf.reduce_sum(gt_params_weight) + 1)
-
-        gt_index, index = tf.py_func(asign.apply, gt_boxes, boxes)
-        gt_boxes = tf.gather(gt_boxes, gt_index)
-        boxes = tf.gather(boxes, index)
-
-        mlogits = config.predict_masks(ft, boxes)
-
-        gt_masks = tf.py_func(mask_extractor.apply, gt_masks, gt_boxes, boxes)
-        mxe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=mlogits, labels=gt_masks)
-        mxe = tf.reduce_mean(mxe)
-
-    tf.identity(logits, name='logits')
-    tf.identity(params, name='params')
-    tf.identity(boxes, name='boxes')
-    tf.identity(mlogits, name='mlogits')
-    xe = tf.identity(xe, name='xe') # cross-entropy
-    mxe = tf.identity(mxe, name='mxe') # cross-entropy
-    pl = tf.identity(pl * FLAGS.pl_weight, name='pl') # params-loss
-    reg = tf.identity(tf.reduce_sum(tf.losses.get_regularization_losses()) * FLAGS.re_weight, name='re')
-
-    loss = tf.identity(xe + mxe + pl + reg, name='lo')
-
-    return loss, [loss, xe, mxe, pl, reg]
-
 def patch_arg_scopes ():
     def resnet_arg_scope (weight_decay=0.0001):
         print_red("Patching resnet_v2 arg_scope when training from scratch")
@@ -103,6 +32,25 @@ def patch_arg_scopes ():
     nets_factory.arg_scopes_map['resnet_v2_200'] = resnet_arg_scope
     pass
 
+def tf_repeat(tensor, repeats):
+    """
+    Args:
+
+    input: A Tensor. 1-D or higher.
+    repeats: A list. Number of repeat for each dimension, length must be the same as the number of dimensions in input
+
+    Returns:
+    
+    A Tensor. Has the same type as input. Has the shape of tensor.shape * repeats
+    """
+    with tf.variable_scope("repeat"):
+        expanded_tensor = tf.expand_dims(tensor, -1)
+        multiples = [1] + repeats
+        tiled_tensor = tf.tile(expanded_tensor, multiples = multiples)
+        repeated_tesnor = tf.reshape(tiled_tensor, tf.shape(tensor) * repeats)
+    return repeated_tesnor
+
+
 augments = None
 #from . config import *
 #if os.path.exists('config.py'):
@@ -111,8 +59,6 @@ def print_red (txt):
 
 def print_green (txt):
     print('\033[92m' + txt + '\033[0m')
-
-print(augments)
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -126,8 +72,11 @@ flags.DEFINE_integer('size', None, '')
 flags.DEFINE_integer('batch', 1, 'Batch size.  ')
 flags.DEFINE_integer('shift', 0, '')
 flags.DEFINE_integer('backbone_stride', 16, '')
-flags.DEFINE_integer('ft_filters', 256, '')
-flags.DEFINE_integer('ft_stride', 4, '')
+flags.DEFINE_integer('anchor_filters', 128, '')
+flags.DEFINE_integer('anchor_stride', 4, '')
+flags.DEFINE_integer('mask_filters', 128, '')
+flags.DEFINE_integer('mask_stride', 1, '')
+flags.DEFINE_integer('mask_size', 128, '')
 
 flags.DEFINE_string('backbone', 'resnet_v2_50', 'architecture')
 flags.DEFINE_string('model', None, 'model directory')
@@ -153,6 +102,148 @@ flags.DEFINE_float('re_weight', 0.1, '')
 COLORSPACE = 'BGR'
 PIXEL_MEANS = tf.constant([[[[127.0, 127.0, 127.0]]]])
 VGG_PIXEL_MEANS = tf.constant([[[[103.94, 116.78, 123.68]]]])
+
+PRIORS = [1]    # placeholder
+
+class Inputs:
+    def __init__ (self):
+        self.X = tf.placeholder(tf.float32, shape=(None, None, None, 3), name="images")
+        # gt_xxx groundtruth
+        self.gt_masks = tf.placeholder(tf.int32, shape=(None, None, None, 1))
+        self.gt_anchors = tf.placeholder(tf.int32, shape=(None, None, None, shape_config.priors))
+        self.gt_anchors_weight = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors))
+        self.gt_params = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors * shape_config.params))
+        self.gt_params_weight = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors))
+        self.gt_boxes = tf.placeholder(tf.float32, shape=(None, None))
+        self.is_training = tf.placeholder(tf.bool, name="is_training")
+        pass
+
+    # create feed_dict from a picpac sample
+    def feed_dict (self, sample, is_training):
+        _, images, gt_masks_, gt_anchors_, gt_anchors_weight_, gt_params_, gt_params_weight_, gt_boxes_ = sample  # unpack picpac sample
+        return {self.X: images,
+                self.gt_masks: gt_masks_,
+                self.gt_anchors: gt_anchors_,
+                self.gt_anchors_weight: gt_anchors_weight_,
+                self.gt_params: gt_params_,
+                self.gt_params_weight: gt_params_weight_,
+                self.gt_boxes: gt_boxes_,
+                self.is_training: is_training}
+        pass
+
+
+def anchors2boxes (shape, anchor_params)
+    # anchor parameters are: dx, dy, w, h
+    B = shape[0]
+    H = shape[1]
+    W = shape[2]
+    if True:    # generate array of box centers
+        x0 = tf.cast(tf.range(W) * FLAGS.anchor_stride, tf.float32)
+        y0 = tf.cast(tf.range(H) * FLAGS.anchor_stride, tf.float32)
+        x0, y0 = tf.meshgrid(x0, y0)
+        x0 = tf.reshape(x0, (-1,))
+        y0 = tf.reshape(y0, (-1,))
+        x0 = tf.tile(tf_repeat(x0, [len(PRIORS)]), [B])
+        y0 = tf.tile(tf_repeat(y0, [len(PRIORS)]), [B])
+    dx, dy, w, h = [tf.squeeze(x, axis=1) for x in tf.split(anchor_params, [1,1,1,1], 1)]
+
+    x1 = x0 + dx - w/2
+    y1 = y0 + dy - h/2
+    x2 = x1 + w
+    y2 = y1 + h
+    maxX = W-1
+    maxY = H-1
+    x1 = tf.clip_by_value(x1, 0, max_X) 
+    y1 = tf.clip_by_value(y1, 0, max_Y)
+    x2 = tf.clip_by_value(x2, 0, max_X)
+    y2 = tf.clip_by_value(y2, 0, max_Y)
+    return tf.stack([x1, y1, x2, y2], axis=1)
+
+def normalize_boxes (shape, boxes):
+    H = shape[1]
+    W = shape[2]
+    maxX = W-1
+    maxY = H-1
+    x1,y1,x2,y2 = [tf.squeeze(x, axis=1) for x in tf.split(boxes, [1,1,1,1], 1)]
+    x1 = x1 / maxX
+    y1 = y1 / maxY
+    x2 = x2 / maxX
+    y2 = y2 / maxY
+    return tf.stack([x1, y1, x2, y2], axis=1)
+
+def create_model (inputs, backbone_fn):
+    #box_ft, mask_ft, gt_masks, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, gt_boxes, config):
+    # ft:           B * H' * W' * 3     input feature, H' W' is feature map size
+    # gt_counts:    B                   number of boxes in each sample of the batch
+    # gt_boxes:     ? * 4               boxes
+    bb, _ = backbone_fn(inputs.X-PIXEL_MEANS, global_pool=False, output_stride=FLAGS.backbone_stride)
+
+    box_matcher = cpp.BoxMatcher()
+    mask_extractor = cpp.MaskExtractor(FLAGS.mask_size, FLAGS.mask_size)
+
+    with tf.variable_scope('boxnet'):
+
+        assert FLAGS.backbone_stride % FLAGS.ft_stride == 0
+        ss = FLAGS.backbone_stride // FLAGS.anchor_stride
+        # generate anchor feature
+        anchor_ft = slim.conv2d_transpose(bb, FLAGS.anchor_filters, ss*2, ss)
+
+        assert FLAGS.backbone_stride % FLAGS.mask_stride == 0
+        ss = FLAGS.backbone_stride // FLAGS.mask_stride
+        mask_ft = slim.conv2d_transpose(bb, FLAGS.mask_filters, ss*2, ss)
+
+        anchor_logits = slim.conv2d(anchor_ft, 2 * len(PRIORS), 3, 1, activation_fn=None) 
+        anchor_logits2 = tf.reshape(logits, (-1, 2))   # ? * 2
+        # anchor probabilities
+        anchor_prob = tf.squeeze(tf.slice(tf.nn.softmax(anchor_logits2), [0, 1], [-1, 1]), 1)
+
+        gt_anchors = tf.reshape(inputs.gt_anchors, (-1, ))
+        gt_anchors_weight = tf.reshape(inputs.gt_anchors_weight, (-1,))
+
+        # anchor cross-entropy
+        axe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=anchor_logits2, labels=gt_anchors)
+        axe = axe * gt_anchors_weight
+        axe = tf.reduce_sum(axe) / (tf.reduce_sum(gt_anchors_weight) + 1)
+
+        params = slim.conv2d(anchor_ft, 4 * len(PRIORS), 3, 1, activation_fn=None)
+        params = tf.reshape(params, (-1, 4))     # ? * 4
+        gt_params = tf.reshape(inputs.gt_params, (-1, 4))
+        gt_params_weight = tf.reshape(inputs.gt_params_weight, (-1,))
+        # params loss
+        pl = params2 - gt_params
+        pl = pl * pl
+        pl = tf.reduce_sum(pl, axis=1) * gt_params_weight
+        pl = tf.reduce_sum(pl) / (tf.reduce_sum(gt_params_weight) + 1)
+
+        # generate boxes from anchor params
+        boxes = anchors2boxes(tf.shape(anchor_ft), params)
+
+        gt_index, index, box_ind = tf.py_func(box_matcher.apply, anchor_prob, boxes, inputs.gt_boxes)
+        boxes = tf.gather(boxes, index)
+        gt_boxes = tf.gather(gt_boxes, gt_index)
+
+        # mask_ft
+        boxes = normalize_boxes(X, boxes)
+        mask_ft = tf.image.crop_and_resize(mask_ft, boxes, box_ind, [FLAGS.mask_size, FLAGS.mask_size])
+        mlogits = slim.conv2d(mask_ft, 2, 3, 1, activation_fn=None) 
+
+        gt_masks = tf.py_func(mask_extractor.apply, inputs.gt_masks, gt_boxes, boxes)
+        # mask cross entropy
+        mxe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=mlogits, labels=gt_masks)
+        mxe = tf.reduce_mean(mxe)
+
+    tf.identity(logits, name='logits')
+    tf.identity(params, name='params')
+    tf.identity(boxes, name='boxes')
+    tf.identity(mlogits, name='mlogits')
+    axe = tf.identity(axe, name='axe') # cross-entropy
+    mxe = tf.identity(mxe, name='mxe') # cross-entropy
+    pl = tf.identity(pl * FLAGS.pl_weight, name='pl') # params-loss
+    reg = tf.identity(tf.reduce_sum(tf.losses.get_regularization_losses()) * FLAGS.re_weight, name='re')
+
+    loss = tf.identity(axe + mxe + pl + reg, name='lo')
+
+    return loss, [loss, axe, mxe, pl, reg]
 
 def setup_finetune (ckpt, exclusions):
     print("Finetuning %s" % ckpt)
@@ -245,37 +336,19 @@ def main (_):
     elif FLAGS.shape == 'box':
         shape_config = ShapeConfig(4)
 
-    X = tf.placeholder(tf.float32, shape=(None, None, None, 3), name="images")
-    # ground truth labels
-    gt_masks = tf.placeholder(tf.int32, shape=(None, None, None, 1))
-    gt_labels = tf.placeholder(tf.int32, shape=(None, None, None, shape_config.priors))
-    gt_labels_weight = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors))
-    gt_params = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors * shape_config.params))
-    gt_params_weight = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors))
-    gt_boxes = tf.placeholder(tf.float32, shape=(None, None))
-
-    is_training = tf.placeholder(tf.bool, name="is_training")
+    inputs = Inputs()
 
     if not FLAGS.finetune:
         patch_arg_scopes()
-    #with \
-    #     slim.arg_scope([slim.batch_norm], decay=0.9, epsilon=5e-4): 
 
-    if not FLAGS.finetune:
-        patch_arg_scopes()
-    #with \
-    #     slim.arg_scope([slim.batch_norm], decay=0.9, epsilon=5e-4): 
-    network_fn = nets_factory.get_network_fn(FLAGS.backbone, num_classes=None,
+    backbone_fn = nets_factory.get_network_fn(FLAGS.backbone, num_classes=None,
                 weight_decay=FLAGS.weight_decay, is_training=is_training)
 
     with slim.arg_scope([slim.conv2d, slim.conv2d_transpose, slim.max_pool2d], padding='SAME'), \
          slim.arg_scope([slim.conv2d, slim.conv2d_transpose], weights_regularizer=slim.l2_regularizer(2.5e-4), normalizer_fn=slim.batch_norm, normalizer_params={'decay': 0.9, 'epsilon': 5e-4, 'scale': False, 'is_training':is_training}), \
          slim.arg_scope([slim.batch_norm], is_training=is_training):
-        bb, _ = network_fn(X-PIXEL_MEANS, global_pool=False, output_stride=16)
-        assert FLAGS.backbone_stride % FLAGS.ft_stride == 0
-        ss = FLAGS.backbone_stride // FLAGS.ft_stride
-        ft = slim.conv2d_transpose(bb, FLAGS.ft_filters, ss*2, ss)
-        loss, metrics = create_net(ft, gt_masks, gt_labels, gt_labels_weight, gt_params, gt_params_weight, gt_boxes, shape_config)
+        loss, metrics = create_model(inputs, backbone_fn)
+
 
     #network_fn = nets_factory.get_network_fn(FLAGS.backbone, num_classes=None,
     #            weight_decay=FLAGS.weight_decay, is_training=is_training)
@@ -336,16 +409,8 @@ def main (_):
             cnt, metrics_sum = 0, np.array([0] * len(metrics), dtype=np.float32)
             progress = tqdm(range(epoch_steps), leave=False)
             for _ in progress:
-                _, images, gt_masks_, gt_labels_, gt_labels_weight_, gt_params_, gt_params_weight_, gt_boxes_ = stream.next()
-                feed_dict = {X: images,
-                             gt_masks: gt_masks_,
-                             gt_labels: gt_labels_,
-                             gt_labels_weight: gt_labels_weight_,
-                             gt_params: gt_params_,
-                             gt_params_weight: gt_params_weight_,
-                             gt_boxes: gt_boxes_,
-                             is_training: True}
-                mm, _ = sess.run([metrics, train_op], feed_dict=feed_dict)
+                sample = stream.next()
+                mm, _ = sess.run([metrics, train_op], feed_dict=inputs.feed_dict(sample, True))
                 metrics_sum += np.array(mm) * images.shape[0]
                 cnt += images.shape[0]
                 metrics_txt = format_metrics(metrics_sum/cnt)
@@ -368,16 +433,8 @@ def main (_):
                 cnt, metrics_sum = 0, np.array([0] * len(metrics), dtype=np.float32)
                 val_stream.reset()
                 progress = tqdm(val_stream, leave=False)
-                for _, images, gt_masks_, gt_labels_, gt_labels_weight_, gt_params_, gt_params_weight_, gt_boxes_ in progress:
-                    feed_dict = {X: images,
-                             gt_masks: gt_masks_,
-                             gt_labels: gt_labels_,
-                             gt_labels_weight: gt_labels_weight_,
-                             gt_params: gt_params_,
-                             gt_params_weight: gt_params_weight_,
-                             gt_boxes: gt_boxes_,
-                             is_training: False}
-                    p, mm = sess.run([probs, metrics], feed_dict=feed_dict)
+                for sample in progress:
+                    p, mm = sess.run([probs, metrics], feed_dict=inputs.feed_dict(sample, False))
                     metrics_sum += np.array(mm) * images.shape[0]
                     cnt += images.shape[0]
                     Ys.extend(list(meta.labels))

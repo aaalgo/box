@@ -33,7 +33,7 @@ class ShapeConfig:
         return tf.reduce_sum(diff, axis=1)
     pass
 
-def create_net (ft, gt_labels, gt_labels_mask, gt_params, gt_params_mask, config):
+def create_net (ft, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, config):
     # ft:           B * H' * W' * 3     input feature, H' W' is feature map size
     # gt_counts:    B                   number of boxes in each sample of the batch
     # gt_boxes:     ? * 4               boxes
@@ -42,19 +42,19 @@ def create_net (ft, gt_labels, gt_labels_mask, gt_params, gt_params_mask, config
         logits = config.predict_logits(ft)     # B * H' * W' * (M * 2)
         logits2 = tf.reshape(logits, (-1, 2))   # ? * 2
 
-        gt_labels = tf.reshape(gt_labels, (-1, ))
-        gt_labels_mask = tf.reshape(gt_labels_mask, (-1,))
-        xe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits2, labels=gt_labels)
-        xe = xe * gt_labels_mask
-        xe = tf.reduce_sum(xe) / (tf.reduce_sum(gt_labels_mask) + 1)
+        gt_anchors = tf.reshape(gt_anchors, (-1, ))
+        gt_anchors_weight = tf.reshape(gt_anchors_weight, (-1,))
+        xe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits2, labels=gt_anchors)
+        xe = xe * gt_anchors_weight
+        xe = tf.reduce_sum(xe) / (tf.reduce_sum(gt_anchors_weight) + 1)
 
         params = config.predict_params(ft)       # B * H' * W' * M * 4
         params2 = tf.reshape(params, (-1, config.params))     # ? * 4
         gt_params = tf.reshape(gt_params, (-1, config.params))
-        gt_params_mask = tf.reshape(gt_params_mask, (-1,))
+        gt_params_weight = tf.reshape(gt_params_weight, (-1,))
         pl = config.params_loss(params2, gt_params)
-        pl = pl * gt_params_mask
-        pl = tf.reduce_sum(pl) / (tf.reduce_sum(gt_params_mask) + 1)
+        pl = pl * gt_params_weight
+        pl = tf.reduce_sum(pl) / (tf.reduce_sum(gt_params_weight) + 1)
 
     logits= tf.identity(logits, name='logits')
     params = tf.identity(params, name='params')
@@ -228,10 +228,10 @@ def main (_):
 
     X = tf.placeholder(tf.float32, shape=(None, None, None, 3), name="images")
     # ground truth labels
-    gt_labels = tf.placeholder(tf.int32, shape=(None, None, None, shape_config.priors))
-    gt_labels_mask = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors))
+    gt_anchors = tf.placeholder(tf.int32, shape=(None, None, None, shape_config.priors))
+    gt_anchors_weight = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors))
     gt_params = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors * shape_config.params))
-    gt_params_mask = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors))
+    gt_params_weight = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors))
 
     is_training = tf.placeholder(tf.bool, name="is_training")
 
@@ -254,7 +254,7 @@ def main (_):
         assert FLAGS.backbone_stride % FLAGS.ft_stride == 0
         ss = FLAGS.backbone_stride // FLAGS.ft_stride
         ft = slim.conv2d_transpose(bb, FLAGS.ft_filters, ss*2, ss)
-        _, _, loss, metrics = create_net(ft, gt_labels, gt_labels_mask, gt_params, gt_params_mask, shape_config)
+        _, _, loss, metrics = create_net(ft, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, shape_config)
 
     #network_fn = nets_factory.get_network_fn(FLAGS.backbone, num_classes=None,
     #            weight_decay=FLAGS.weight_decay, is_training=is_training)
@@ -315,12 +315,12 @@ def main (_):
             cnt, metrics_sum = 0, np.array([0] * len(metrics), dtype=np.float32)
             progress = tqdm(range(epoch_steps), leave=False)
             for _ in progress:
-                _, images, _, gt_labels_, gt_labels_mask_, gt_params_, gt_params_mask_ = stream.next()
+                _, images, _, gt_anchors_, gt_anchors_weight_, gt_params_, gt_params_weight_ = stream.next()
                 feed_dict = {X: images,
-                             gt_labels: gt_labels_,
-                             gt_labels_mask: gt_labels_mask_,
+                             gt_anchors: gt_anchors_,
+                             gt_anchors_weight: gt_anchors_weight_,
                              gt_params: gt_params_,
-                             gt_params_mask: gt_params_mask_,
+                             gt_params_weight: gt_params_weight_,
                              is_training: True}
                 mm, _ = sess.run([metrics, train_op], feed_dict=feed_dict)
                 metrics_sum += np.array(mm) * images.shape[0]
@@ -345,12 +345,12 @@ def main (_):
                 cnt, metrics_sum = 0, np.array([0] * len(metrics), dtype=np.float32)
                 val_stream.reset()
                 progress = tqdm(val_stream, leave=False)
-                for _, images, _, gt_labels_, gt_labels_mask_, gt_params_, gt_params_mask_ in progress:
+                for _, images, _, gt_anchors_, gt_anchors_weight_, gt_params_, gt_params_weight_ in progress:
                     feed_dict = {X: images,
-                             gt_labels: gt_labels_,
-                             gt_labels_mask: gt_labels_mask_,
+                             gt_anchors: gt_anchors_,
+                             gt_anchors_weight: gt_anchors_weight_,
                              gt_params: gt_params_,
-                             gt_params_mask: gt_params_mask_,
+                             gt_params_weight: gt_params_weight_,
                              is_training: False}
                     p, mm = sess.run([probs, metrics], feed_dict=feed_dict)
                     metrics_sum += np.array(mm) * images.shape[0]
