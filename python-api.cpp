@@ -19,15 +19,81 @@ namespace {
     using std::endl;
     using std::vector;
 
-    class AlignBoxes {
+    float box_area (float const *b) {
+        return (b[2] - b[0]) * (b[3] - b[1]);
+    }
+
+    float iou_score (float const *b1, float const *b2) {
+        float ibox[] = {std::max(b1[0], b2[0]),
+                        std::max(b1[1], b2[1]),
+                        std::min(b1[2], b2[2]),
+                        std::min(b1[3], b2[3])};
+        float ia = box_area(ibox);
+        float ua = box_area(b1) + box_area(b2) - ia;
+        return ia / (ua + 1.0);
+    }
+
+    class GTMatcher {
+        float iou_th;
     public:
-        list apply (np::ndarray gt_boxes, np::ndarray boxes) {
-            CHECK(gt_boxes.get_nd() == 2);
+        GTMatcher (float th_): iou_th(th_) {
+        }
+
+        list apply (np::ndarray boxes,
+                    np::ndarray box_ind_,
+                    np::ndarray gt_boxes) {
             CHECK(boxes.get_nd() == 2);
-            CHECK(gt_boxes.shape(1) >= 3);
             CHECK(boxes.shape(1) == 4);
-            list result;
-            return result;
+            CHECK(gt_boxes.get_nd() == 2);
+            CHECK(gt_boxes.shape(1) >= 7);
+            // assign prediction to gt_boxes
+            // algorithm:
+            //      for each gt box pick the best match
+            int nb = boxes.shape(0);
+            int ng = gt_boxes.shape(0);
+            CHECK(nb == box_ind_.shape(0));
+            vector<bool> used(nb, false);
+
+            vector<std::pair<int, int>> match;
+
+            int32_t const *box_ind = (int32_t const *)(box_ind_.get_data());
+            for (int i = 0; i < ng; ++i) {
+                // i-th gt box
+                float const *gt = (float const *)(gt_boxes.get_data() + gt_boxes.strides(0) * i);
+                int ind = gt[0];
+                gt = gt + 3;    // the box parameters
+                float iou = iou_th;
+                int best = -1;
+                for (int j = 0; j < nb; ++j) {
+                    if (box_ind[j] != ind) continue; // not the same image
+                    if (used[j]) continue;
+                    float const *b = (float const *)(boxes.get_data() + boxes.strides(0) * j);
+                    float s = iou_score(gt, b);
+                    if (s > iou) {
+                        iou = s;
+                        best = j;
+                    }
+                }
+                if (best >= 0) {
+                    match.emplace_back(best, i);
+                    used[best] = true;
+                }
+            }
+
+            list r;
+            np::ndarray idx1 = np::zeros(make_tuple(match.size()), np::dtype::get_builtin<int32_t>());
+            np::ndarray idx2 = np::zeros(make_tuple(match.size()), np::dtype::get_builtin<int32_t>());
+            int32_t *p1 = (int32_t *)idx1.get_data();
+            int32_t *p2 = (int32_t *)idx2.get_data();
+            for (auto const &p: match) {
+                *p1 = p.first;
+                *p2 = p.second;
+                ++p1;
+                ++p2;
+            }
+            r.append(idx1);
+            r.append(idx2);
+            return r;
         }
     };
 
@@ -88,8 +154,8 @@ namespace {
 BOOST_PYTHON_MODULE(cpp)
 {
     np::initialize();
-    class_<AlignBoxes>("AlignBoxes", init<>())
-        .def("apply", &AlignBoxes::apply)
+    class_<GTMatcher>("GTMatcher", init<float>())
+        .def("apply", &GTMatcher::apply)
     ;
     class_<MaskExtractor>("MaskExtractor", init<int, int>())
         .def("apply", &MaskExtractor::apply)

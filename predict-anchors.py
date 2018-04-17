@@ -3,6 +3,7 @@ import os
 import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 sys.path.insert(0, 'build/lib.linux-x86_64-3.5')
+sys.path.insert(0, '../picpac/build/lib.linux-x86_64-3.5')
 import time
 from tqdm import tqdm
 import numpy as np
@@ -11,6 +12,7 @@ from skimage import measure
 # RESNET: import these for slim version of resnet
 import tensorflow as tf
 from tensorflow.python.framework import meta_graph
+import picpac
 import cpp
 
 class Model:
@@ -44,7 +46,7 @@ def save_prediction_image (path, image, prob, params):
     assert H % Hm == 0
     assert W % Wm == 0
     assert H // Hm == W // Wm
-    prop = getattr(cpp, FLAGS.shape + 'Proposal')(H//Hm, FLAGS.cth, FLAGS.th)
+    prop = getattr(picpac, FLAGS.shape + 'Proposal')(H//Hm, FLAGS.cth, FLAGS.th)
     vis = np.copy(image).astype(np.float32)
     x = prop.apply(prob, params, vis)
 

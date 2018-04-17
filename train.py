@@ -3,7 +3,8 @@ import os
 import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 sys.path.append(os.path.join(os.path.abspath(os.path.dirname(__file__)), 'models/research/slim'))
-sys.path.insert(0, 'picpac/build/lib.linux-x86_64-3.5')
+sys.path.insert(0, 'build/lib.linux-x86_64-3.5')
+sys.path.insert(0, '../picpac/build/lib.linux-x86_64-3.5')
 import time
 import datetime
 import logging
@@ -77,6 +78,9 @@ flags.DEFINE_integer('anchor_stride', 4, '')
 flags.DEFINE_integer('mask_filters', 128, '')
 flags.DEFINE_integer('mask_stride', 1, '')
 flags.DEFINE_integer('mask_size', 128, '')
+flags.DEFINE_float('anchor_th', 0.5, '')
+flags.DEFINE_float('nms_th', 0.5, '')
+flags.DEFINE_float('match_th', 0.5, '')
 
 flags.DEFINE_string('backbone', 'resnet_v2_50', 'architecture')
 flags.DEFINE_string('model', None, 'model directory')
@@ -108,12 +112,14 @@ PRIORS = [1]    # placeholder
 class Inputs:
     def __init__ (self):
         self.X = tf.placeholder(tf.float32, shape=(None, None, None, 3), name="images")
+        self.anchor_th = tf.placeholder(tf.float32, shape=(), name="anchor_th")
+        self.nms_th = tf.placeholder(tf.float32, shape=(), name="nms_th")
         # gt_xxx groundtruth
         self.gt_masks = tf.placeholder(tf.int32, shape=(None, None, None, 1))
-        self.gt_anchors = tf.placeholder(tf.int32, shape=(None, None, None, shape_config.priors))
-        self.gt_anchors_weight = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors))
-        self.gt_params = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors * shape_config.params))
-        self.gt_params_weight = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors))
+        self.gt_anchors = tf.placeholder(tf.int32, shape=(None, None, None, len(PRIORS)))
+        self.gt_anchors_weight = tf.placeholder(tf.float32, shape=(None, None, None, len(PRIORS)))
+        self.gt_params = tf.placeholder(tf.float32, shape=(None, None, None, len(PRIORS) * 4))
+        self.gt_params_weight = tf.placeholder(tf.float32, shape=(None, None, None, len(PRIORS)))
         self.gt_boxes = tf.placeholder(tf.float32, shape=(None, None))
         self.is_training = tf.placeholder(tf.bool, name="is_training")
         pass
@@ -122,6 +128,8 @@ class Inputs:
     def feed_dict (self, sample, is_training):
         _, images, gt_masks_, gt_anchors_, gt_anchors_weight_, gt_params_, gt_params_weight_, gt_boxes_ = sample  # unpack picpac sample
         return {self.X: images,
+                self.anchor_th: FLAGS.anchor_th,
+                self.nms_th: FLAGS.nms_th,
                 self.gt_masks: gt_masks_,
                 self.gt_anchors: gt_anchors_,
                 self.gt_anchors_weight: gt_anchors_weight_,
@@ -132,7 +140,7 @@ class Inputs:
         pass
 
 
-def anchors2boxes (shape, anchor_params)
+def anchors2boxes (shape, anchor_params):
     # anchor parameters are: dx, dy, w, h
     B = shape[0]
     H = shape[1]
@@ -151,25 +159,32 @@ def anchors2boxes (shape, anchor_params)
     y1 = y0 + dy - h/2
     x2 = x1 + w
     y2 = y1 + h
-    maxX = W-1
-    maxY = H-1
+    max_X = tf.cast(W-1, tf.float32)
+    max_Y = tf.cast(H-1, tf.float32)
     x1 = tf.clip_by_value(x1, 0, max_X) 
     y1 = tf.clip_by_value(y1, 0, max_Y)
     x2 = tf.clip_by_value(x2, 0, max_X)
     y2 = tf.clip_by_value(y2, 0, max_Y)
-    return tf.stack([x1, y1, x2, y2], axis=1)
+
+    boxes = tf.stack([x1, y1, x2, y2], axis=1)
+    return boxes, tf_repeat(tf.range(B), [H * W * len(PRIORS)])
 
 def normalize_boxes (shape, boxes):
     H = shape[1]
     W = shape[2]
-    maxX = W-1
-    maxY = H-1
+    max_X = tf.cast(W-1, tf.float32)
+    max_Y = tf.cast(H-1, tf.float32)
     x1,y1,x2,y2 = [tf.squeeze(x, axis=1) for x in tf.split(boxes, [1,1,1,1], 1)]
-    x1 = x1 / maxX
-    y1 = y1 / maxY
-    x2 = x2 / maxX
-    y2 = y2 / maxY
+    x1 = x1 / max_X
+    y1 = y1 / max_Y
+    x2 = x2 / max_X
+    y2 = y2 / max_Y
     return tf.stack([x1, y1, x2, y2], axis=1)
+
+def shift_boxes (boxes, box_ind):
+    assert FLAGS.batch == 1
+    return boxes
+
 
 def create_model (inputs, backbone_fn):
     #box_ft, mask_ft, gt_masks, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, gt_boxes, config):
@@ -178,12 +193,12 @@ def create_model (inputs, backbone_fn):
     # gt_boxes:     ? * 4               boxes
     bb, _ = backbone_fn(inputs.X-PIXEL_MEANS, global_pool=False, output_stride=FLAGS.backbone_stride)
 
-    box_matcher = cpp.BoxMatcher()
+    gt_matcher = cpp.GTMatcher(FLAGS.match_th)
     mask_extractor = cpp.MaskExtractor(FLAGS.mask_size, FLAGS.mask_size)
 
     with tf.variable_scope('boxnet'):
 
-        assert FLAGS.backbone_stride % FLAGS.ft_stride == 0
+        assert FLAGS.backbone_stride % FLAGS.anchor_stride == 0
         ss = FLAGS.backbone_stride // FLAGS.anchor_stride
         # generate anchor feature
         anchor_ft = slim.conv2d_transpose(bb, FLAGS.anchor_filters, ss*2, ss)
@@ -193,7 +208,7 @@ def create_model (inputs, backbone_fn):
         mask_ft = slim.conv2d_transpose(bb, FLAGS.mask_filters, ss*2, ss)
 
         anchor_logits = slim.conv2d(anchor_ft, 2 * len(PRIORS), 3, 1, activation_fn=None) 
-        anchor_logits2 = tf.reshape(logits, (-1, 2))   # ? * 2
+        anchor_logits2 = tf.reshape(anchor_logits, (-1, 2))   # ? * 2
         # anchor probabilities
         anchor_prob = tf.squeeze(tf.slice(tf.nn.softmax(anchor_logits2), [0, 1], [-1, 1]), 1)
 
@@ -210,24 +225,41 @@ def create_model (inputs, backbone_fn):
         gt_params = tf.reshape(inputs.gt_params, (-1, 4))
         gt_params_weight = tf.reshape(inputs.gt_params_weight, (-1,))
         # params loss
-        pl = params2 - gt_params
+        pl = params - gt_params
         pl = pl * pl
         pl = tf.reduce_sum(pl, axis=1) * gt_params_weight
         pl = tf.reduce_sum(pl) / (tf.reduce_sum(gt_params_weight) + 1)
 
         # generate boxes from anchor params
-        boxes = anchors2boxes(tf.shape(anchor_ft), params)
+        boxes, box_ind = anchors2boxes(tf.shape(anchor_ft), params)
 
-        gt_index, index, box_ind = tf.py_func(box_matcher.apply, anchor_prob, boxes, inputs.gt_boxes)
+        sel = tf.greater_equal(anchor_prob, inputs.anchor_th)
+        # sel is a boolean mask
+
+        # select only boxes with prob > th for nms
+        anchor_prob = tf.boolean_mask(anchor_prob, sel)
+        boxes = tf.boolean_mask(boxes, sel)
+        box_ind = tf.boolean_mask(box_ind, sel)
+
+        sel = tf.image.non_max_suppression(shift_boxes(boxes, box_ind), anchor_prob, 10000, iou_threshold=inputs.nms_th)
+        # sel is a list of indices
+
+        anchor_prob = None  # discard
+        boxes = tf.gather(boxes, sel)
+        box_ind = tf.gather(box_ind, sel)
+
+        index, gt_index = tf.py_func(gt_matcher.apply, [boxes, box_ind, inputs.gt_boxes], [tf.int32, tf.int32])
         boxes = tf.gather(boxes, index)
-        gt_boxes = tf.gather(gt_boxes, gt_index)
+        box_ind = tf.gather(box_ind, index)
+        gt_boxes = tf.gather(inputs.gt_boxes, gt_index)
 
         # mask_ft
-        boxes = normalize_boxes(X, boxes)
-        mask_ft = tf.image.crop_and_resize(mask_ft, boxes, box_ind, [FLAGS.mask_size, FLAGS.mask_size])
+        # normalize boxes to [0-1]
+        nboxes = normalize_boxes(inputs.X, boxes)
+        mask_ft = tf.image.crop_and_resize(mask_ft, nboxes, box_ind, [FLAGS.mask_size, FLAGS.mask_size])
         mlogits = slim.conv2d(mask_ft, 2, 3, 1, activation_fn=None) 
 
-        gt_masks = tf.py_func(mask_extractor.apply, inputs.gt_masks, gt_boxes, boxes)
+        gt_masks = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, boxes], [tf.int32])
         # mask cross entropy
         mxe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=mlogits, labels=gt_masks)
         mxe = tf.reduce_mean(mxe)
@@ -302,7 +334,7 @@ def create_picpac_stream (db_path, is_training):
               "colorspace": COLORSPACE,
               "transforms": augments + [
                   {"type": "clip", "round": FLAGS.backbone_stride},
-                  {"type": "anchors.dense.box", 'downsize': FLAGS.ft_stride},
+                  {"type": "anchors.dense.box", 'downsize': FLAGS.anchor_stride},
                   {"type": "box_feature"},
                   {"type": "rasterize"},
                   ]
@@ -331,33 +363,18 @@ def main (_):
         COLORSPACE = 'RGB'
         PIXEL_MEANS = VGG_PIXEL_MEANS
 
-    if FLAGS.shape == 'circle':
-        shape_config = ShapeConfig(3)
-    elif FLAGS.shape == 'box':
-        shape_config = ShapeConfig(4)
-
     inputs = Inputs()
 
     if not FLAGS.finetune:
         patch_arg_scopes()
 
     backbone_fn = nets_factory.get_network_fn(FLAGS.backbone, num_classes=None,
-                weight_decay=FLAGS.weight_decay, is_training=is_training)
+                weight_decay=FLAGS.weight_decay, is_training=inputs.is_training)
 
     with slim.arg_scope([slim.conv2d, slim.conv2d_transpose, slim.max_pool2d], padding='SAME'), \
-         slim.arg_scope([slim.conv2d, slim.conv2d_transpose], weights_regularizer=slim.l2_regularizer(2.5e-4), normalizer_fn=slim.batch_norm, normalizer_params={'decay': 0.9, 'epsilon': 5e-4, 'scale': False, 'is_training':is_training}), \
-         slim.arg_scope([slim.batch_norm], is_training=is_training):
+         slim.arg_scope([slim.conv2d, slim.conv2d_transpose], weights_regularizer=slim.l2_regularizer(2.5e-4), normalizer_fn=slim.batch_norm, normalizer_params={'decay': 0.9, 'epsilon': 5e-4, 'scale': False, 'is_training':inputs.is_training}), \
+         slim.arg_scope([slim.batch_norm], is_training=inputs.is_training):
         loss, metrics = create_model(inputs, backbone_fn)
-
-
-    #network_fn = nets_factory.get_network_fn(FLAGS.backbone, num_classes=None,
-    #            weight_decay=FLAGS.weight_decay, is_training=is_training)
-    #ft, _ = network_fn(X, global_pool=False, output_stride=16)
-    #logits = slim.conv2d_transpose(ft, FLAGS.classes, 32, 16)
-    #logits = tf.identity(logits, name='logits')
-
-    # probability of class 1 -- not very useful if FLAGS.classes > 2
-    #probs = tf.squeeze(tf.slice(tf.nn.softmax(logits), [0,0,0,1], [-1,-1,-1,1]), 3)
 
     metric_names = [x.name[:-2] for x in metrics]
 
