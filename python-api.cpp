@@ -54,10 +54,12 @@ namespace {
         list apply (np::ndarray boxes,
                     np::ndarray box_ind_,
                     np::ndarray gt_boxes) {
+            vector<std::pair<int, int>> match;
+
             CHECK(boxes.get_nd() == 2);
-            CHECK(boxes.shape(1) == 4);
+            CHECK(boxes.shape(0) == 0 || boxes.shape(1) == 4);
             CHECK(gt_boxes.get_nd() == 2);
-            CHECK(gt_boxes.shape(1) >= 7);
+            CHECK(gt_boxes.shape(0) == 0 || gt_boxes.shape(1) >= 7);
             // assign prediction to gt_boxes
             // algorithm:
             //      for each gt box pick the best match
@@ -65,8 +67,6 @@ namespace {
             int ng = gt_boxes.shape(0);
             CHECK(nb == box_ind_.shape(0));
             vector<bool> used(nb, false);
-
-            vector<std::pair<int, int>> match;
 
             int32_t const *box_ind = (int32_t const *)(box_ind_.get_data());
             for (int i = 0; i < ng; ++i) {
@@ -97,6 +97,7 @@ namespace {
                     used[best] = true;
                 }
             }
+
             if (match.size() > max) {
                 std::random_shuffle(match.begin(), match.end());
                 match.resize(max);
@@ -135,17 +136,23 @@ namespace {
         np::ndarray apply (np::ndarray images,
                     np::ndarray gt_boxes,
                     np::ndarray boxes) {
-            CHECK(images.get_nd() == 4);
-            CHECK(gt_boxes.get_nd() == 2);
-            CHECK(boxes.get_nd() == 2);
-            CHECK(gt_boxes.shape(1) >= 3);
-            CHECK(boxes.shape(1) == 4);
-            CHECK(gt_boxes.shape(0) == boxes.shape(0));
-            int n = gt_boxes.shape(0);
+            int n = 0;
             int H = images.shape(1);
             int W = images.shape(2);
             int C = images.shape(3);
             CHECK(C == 1);
+
+            do {
+                CHECK(images.get_nd() == 4);
+                CHECK(gt_boxes.get_nd() == 2);
+                CHECK(boxes.get_nd() == 2);
+                CHECK(gt_boxes.shape(0) == boxes.shape(0));
+                if (gt_boxes.shape(0) == 0) break;
+                CHECK(gt_boxes.shape(1) >= 3);
+                if (boxes.shape(0) == 0) break;
+                CHECK(boxes.shape(1) == 4);
+                n = gt_boxes.shape(0);
+            } while(false);
 
             np::ndarray masks = np::zeros(make_tuple(n, sz.height, sz.width, 1), np::dtype::get_builtin<float>());
 

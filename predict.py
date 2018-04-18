@@ -42,20 +42,37 @@ flags.DEFINE_float('nms_th', 0.2, '')
 flags.DEFINE_integer('stride', 16, '')
 flags.DEFINE_string('shape', 'Circle', '')
 
+tableau20 = [(180, 119, 31), (232, 199, 174), (14, 127, 255), (120, 187, 255),
+			 (44, 160, 44), (138, 223, 152), (40, 39, 214), (150, 152, 255),
+			 (189, 103, 148), (213, 176, 197), (75, 86, 140), (148, 156, 196),
+			 (194, 119, 227), (210, 182, 247), (127, 127, 127), (199, 199, 199),
+			 (34, 189, 188), (141, 219, 219), (207, 190, 23), (229, 218, 158)]
 
 def save_prediction_image (path, image, boxes, masks):
-    # image: original input image
-    # prob: probability
-    vis = np.copy(image).astype(np.float32)
+    images = []
+    image = image.astype(np.uint8)
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    images.append(rgb)
+    vis = np.zeros_like(rgb, dtype=np.uint8)
 
     boxes = np.round(boxes).astype(np.int32)
-    print(image.shape, boxes.shape, masks.shape)
 
     for i in range(boxes.shape[0]):
         x1, y1, x2, y2 = boxes[i]
         cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0))
 
-    cv2.imwrite(path, vis)
+        mask = cv2.resize(masks[i], (x2-x1+1, y2-y1+1))
+        view = vis[y1:(y2+1), x1:(x2+1)]
+        b, g, r = tableau20[i % len(tableau20)]
+        vis[:, :, 0][mask > 0.5] = 0
+        vis[:, :, 1][mask > 0.5] = 0
+        vis[:, :, 2][mask > 0.5] = 0
+        vis[:, :, 0] += b * mask
+        vis[:, :, 1] += g * mask
+        vis[:, :, 2] += r * mask
+    images.append(vis)
+    imageio.mimsave(path + '.gif', images, duration = 1)
+    sp.check_call('gifsicle --colors 256 -O3 < %s.gif > %s; rm %s.gif' % (path, path, path), shell=True)
     pass
 
 def main (_):

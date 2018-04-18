@@ -73,9 +73,10 @@ flags.DEFINE_integer('size', None, '')
 flags.DEFINE_integer('batch', 1, 'Batch size.  ')
 flags.DEFINE_integer('shift', 0, '')
 flags.DEFINE_integer('backbone_stride', 16, '')
-flags.DEFINE_integer('anchor_filters', 128, '')
+flags.DEFINE_integer('anchor_logit_filters', 32, '')
+flags.DEFINE_integer('anchor_params_filters', 64, '')
 flags.DEFINE_integer('anchor_stride', 4, '')
-flags.DEFINE_integer('mask_filters', 128, '')
+flags.DEFINE_integer('mask_filters', 32, '')
 flags.DEFINE_integer('mask_stride', 1, '')
 flags.DEFINE_integer('mask_size', 128, '')
 flags.DEFINE_float('anchor_th', 0.5, '')
@@ -201,8 +202,8 @@ def xxx_print (array):
     return np.zeros([1], dtype=np.float32)
 
 def mask_net (net):
-    net = slim.conv2d(net, 64, 3, 1, scope='masknet1', reuse=tf.AUTO_REUSE)
-    net = slim.conv2d(net, 64, 3, 1, scope='masknet2', reuse=tf.AUTO_REUSE)
+    net = slim.conv2d(net, 32, 3, 1, scope='masknet1', reuse=tf.AUTO_REUSE)
+    net = slim.conv2d(net, 32, 3, 1, scope='masknet2', reuse=tf.AUTO_REUSE)
     net = slim.conv2d(net, 2, 3, 1, activation_fn=None, scope='masknet3', reuse=tf.AUTO_REUSE)
     return net
 
@@ -221,13 +222,14 @@ def create_model (inputs, backbone_fn):
         assert FLAGS.backbone_stride % FLAGS.anchor_stride == 0
         ss = FLAGS.backbone_stride // FLAGS.anchor_stride
         # generate anchor feature
-        anchor_ft = slim.conv2d_transpose(bb, FLAGS.anchor_filters, ss*2, ss)
+        anchor_logits_ft = slim.conv2d_transpose(bb, FLAGS.anchor_logit_filters, ss*2, ss)
+        anchor_params_ft = slim.conv2d_transpose(bb, FLAGS.anchor_params_filters, ss*2, ss)
 
         assert FLAGS.backbone_stride % FLAGS.mask_stride == 0
         ss = FLAGS.backbone_stride // FLAGS.mask_stride
         mask_ft = slim.conv2d_transpose(bb, FLAGS.mask_filters, ss*2, ss)
 
-        anchor_logits = slim.conv2d(anchor_ft, 2 * len(PRIORS), 3, 1, activation_fn=None) 
+        anchor_logits = slim.conv2d(anchor_logits_ft, 2 * len(PRIORS), 3, 1, activation_fn=None) 
         anchor_logits2 = tf.reshape(anchor_logits, (-1, 2))   # ? * 2
         # anchor probabilities
         anchor_prob = tf.squeeze(tf.slice(tf.nn.softmax(anchor_logits2), [0, 1], [-1, 1]), 1)
@@ -240,7 +242,7 @@ def create_model (inputs, backbone_fn):
         axe = axe * gt_anchors_weight
         axe = tf.reduce_sum(axe) / (tf.reduce_sum(gt_anchors_weight) + 1)
 
-        params = slim.conv2d(anchor_ft, 4 * len(PRIORS), 3, 1, activation_fn=None)
+        params = slim.conv2d(anchor_params_ft, 4 * len(PRIORS), 3, 1, activation_fn=None)
         params = tf.reshape(params, (-1, 4))     # ? * 4
         gt_params = tf.reshape(inputs.gt_params, (-1, 4))
         gt_params_weight = tf.reshape(inputs.gt_params_weight, (-1,))
@@ -251,7 +253,7 @@ def create_model (inputs, backbone_fn):
         pl = tf.reduce_sum(pl) / (tf.reduce_sum(gt_params_weight) + 1)
 
         # generate boxes from anchor params
-        boxes, box_ind = anchors2boxes(tf.shape(anchor_ft), params)
+        boxes, box_ind = anchors2boxes(tf.shape(anchor_logits_ft), params)
         boxes_pre = boxes
 
         sel = tf.greater_equal(anchor_prob, inputs.anchor_th)
