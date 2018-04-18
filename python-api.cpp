@@ -23,7 +23,7 @@ namespace {
         return (b[2] - b[0]) * (b[3] - b[1]);
     }
 
-    /*
+#if 0
     float box_iarea (float const *b1, float const *b2) {
         float ibox[] = {std::max(b1[0], b2[0]),
                         std::max(b1[1], b2[1]),
@@ -32,13 +32,15 @@ namespace {
         std::cerr << "AAA " << ibox[0] << " " << ibox[1] << " " << ibox[2] << " " << ibox[3] << std::endl;
         return box_area(ibox);
     }
-    */
+#endif
 
     float iou_score (float const *b1, float const *b2) {
         float ibox[] = {std::max(b1[0], b2[0]),
                         std::max(b1[1], b2[1]),
                         std::min(b1[2], b2[2]),
                         std::min(b1[3], b2[3])};
+        if (ibox[0] >= ibox[2]) return 0;
+        if (ibox[1] >= ibox[3]) return 0;
         float ia = box_area(ibox);
         float ua = box_area(b1) + box_area(b2) - ia;
         return ia / (ua + 1.0);
@@ -98,14 +100,14 @@ namespace {
                 }
             }
 
+            list r;
+            np::ndarray cnt = np::zeros(make_tuple(), np::dtype::get_builtin<float>());
+            *(float *)cnt.get_data() = match.size();
+
             if (match.size() > max) {
                 std::random_shuffle(match.begin(), match.end());
                 match.resize(max);
             }
-
-            list r;
-            np::ndarray cnt = np::zeros(make_tuple(), np::dtype::get_builtin<float>());
-            *(float *)cnt.get_data() = match.size();
 
             np::ndarray idx1 = np::zeros(make_tuple(match.size()), np::dtype::get_builtin<int32_t>());
             np::ndarray idx2 = np::zeros(make_tuple(match.size()), np::dtype::get_builtin<int32_t>());
@@ -175,13 +177,12 @@ namespace {
                 CHECK(x2 < W);
                 CHECK(y2 < H);
                 cv::Rect roi(x1, y1, x2-x1+1, y2-y1+1);
-                //std::cerr << "XXX " << roi.x << ' ' << roi.y << ' ' << roi.width << ' ' << roi.height << std::endl;
                 cv::Mat from = image(roi).clone();
                 for (float *p = from.ptr<float>(0); p < from.ptr<float>(from.rows); ++p) {
-                    if (p[0] == tag) p[0] = 1.0;
+                    if (p[0] == tag) { p[0] = 1.0;}
                     else p[0] = 0.0;
                 }
-                cv::resize(from, mask, mask.size(), 0, 0);
+                cv::resize(from, mask, sz, 0, 0);
             }
             return masks;
         }

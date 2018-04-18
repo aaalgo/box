@@ -10,6 +10,7 @@ import datetime
 import logging
 from tqdm import tqdm
 import numpy as np
+import cv2
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
 from nets import nets_factory, resnet_utils 
@@ -118,7 +119,7 @@ class Inputs:
         self.nms_max = tf.placeholder(tf.int32, shape=(), name="nms_max")
         self.nms_th = tf.placeholder(tf.float32, shape=(), name="nms_th")
         # gt_xxx groundtruth
-        self.gt_masks = tf.placeholder(tf.int32, shape=(None, None, None, 1))
+        self.gt_masks = tf.placeholder(tf.float32, shape=(None, None, None, 1))
         self.gt_anchors = tf.placeholder(tf.int32, shape=(None, None, None, len(PRIORS)))
         self.gt_anchors_weight = tf.placeholder(tf.float32, shape=(None, None, None, len(PRIORS)))
         self.gt_params = tf.placeholder(tf.float32, shape=(None, None, None, len(PRIORS) * 4))
@@ -217,6 +218,8 @@ def create_model (inputs, backbone_fn):
     gt_matcher = cpp.GTMatcher(FLAGS.match_th, FLAGS.max_masks)
     mask_extractor = cpp.MaskExtractor(FLAGS.mask_size, FLAGS.mask_size)
 
+    end_points = {}
+
     with tf.variable_scope('boxnet'):
 
         assert FLAGS.backbone_stride % FLAGS.anchor_stride == 0
@@ -281,7 +284,6 @@ def create_model (inputs, backbone_fn):
         boxes = tf.gather(boxes, sel)
         box_ind = tf.gather(box_ind, sel)
 
-
         hit, index, gt_index = tf.py_func(gt_matcher.apply, [boxes, box_ind, inputs.gt_boxes], [tf.float32, tf.int32, tf.int32])
 
 
@@ -299,7 +301,11 @@ def create_model (inputs, backbone_fn):
         mask_ft = tf.image.crop_and_resize(mask_ft, nboxes, box_ind, [FLAGS.mask_size, FLAGS.mask_size])
         mlogits = mask_net(mask_ft)
 
-        gt_masks = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, boxes], [tf.float32])
+        gt_masks, = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, boxes], [tf.float32])
+        #gt_masks, = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, tf.slice(gt_boxes, [0, 3], [-1, 4])], [tf.float32])
+        end_points['gt_masks'] = gt_masks
+        end_points['gt_boxes'] = gt_boxes
+        end_points['boxes'] = boxes
         gt_masks = tf.cast(tf.round(gt_masks), tf.int32)
         # mask cross entropy
         mxe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=mlogits, labels=gt_masks)
@@ -321,7 +327,7 @@ def create_model (inputs, backbone_fn):
 
     loss = tf.identity(axe + mxe + pl + reg, name='lo')
 
-    return loss, [loss, axe, mxe, pl, reg, precision, recall]
+    return loss, [loss, axe, mxe, pl, reg, precision, recall], end_points
 
 def setup_finetune (ckpt, exclusions):
     print("Finetuning %s" % ckpt)
@@ -382,7 +388,7 @@ def create_picpac_stream (db_path, is_training):
                   {"type": "clip", "round": FLAGS.backbone_stride},
                   {"type": "anchors.dense.box", 'downsize': FLAGS.anchor_stride},
                   {"type": "box_feature"},
-                  {"type": "rasterize", "use_tag": True, "dtype": "float32"},
+                  {"type": "rasterize", "use_tag": True, "dtype": "float32"}
                   ]
              }
     if is_training and not FLAGS.mixin is None:
@@ -420,7 +426,7 @@ def main (_):
     with slim.arg_scope([slim.conv2d, slim.conv2d_transpose, slim.max_pool2d], padding='SAME'), \
          slim.arg_scope([slim.conv2d, slim.conv2d_transpose], weights_regularizer=slim.l2_regularizer(2.5e-4), normalizer_fn=slim.batch_norm, normalizer_params={'decay': 0.9, 'epsilon': 5e-4, 'scale': False, 'is_training':inputs.is_training}), \
          slim.arg_scope([slim.batch_norm], is_training=inputs.is_training):
-        loss, metrics = create_model(inputs, backbone_fn)
+        loss, metrics, end_points = create_model(inputs, backbone_fn)
 
     metric_names = [x.name[:-2] for x in metrics]
 
