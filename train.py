@@ -16,6 +16,7 @@ import tensorflow.contrib.slim as slim
 from nets import nets_factory, resnet_utils 
 import picpac
 import cpp
+from gallery import Gallery
 
 def patch_arg_scopes ():
     def resnet_arg_scope (weight_decay=0.0001):
@@ -78,12 +79,12 @@ flags.DEFINE_integer('anchor_logit_filters', 32, '')
 flags.DEFINE_integer('anchor_params_filters', 64, '')
 flags.DEFINE_integer('anchor_stride', 4, '')
 flags.DEFINE_integer('mask_filters', 32, '')
-flags.DEFINE_integer('mask_stride', 1, '')
+flags.DEFINE_integer('mask_stride', 2, '')
 flags.DEFINE_integer('mask_size', 128, '')
 flags.DEFINE_float('anchor_th', 0.5, '')
 flags.DEFINE_float('nms_th', 0.5, '')
 flags.DEFINE_float('match_th', 0.5, '')
-flags.DEFINE_integer('max_masks', 500, '')
+flags.DEFINE_integer('max_masks', 128, '')
 
 flags.DEFINE_string('backbone', 'resnet_v2_50', 'architecture')
 flags.DEFINE_string('model', None, 'model directory')
@@ -183,16 +184,14 @@ def anchors2boxes (shape, anchor_params):
     return boxes, box_ind
 
 def normalize_boxes (shape, boxes):
-    H = shape[1]
-    W = shape[2]
-    max_X = tf.cast(W-1, tf.float32)
-    max_Y = tf.cast(H-1, tf.float32)
+    max_X = tf.cast(shape[2]-1, tf.float32)
+    max_Y = tf.cast(shape[1]-1, tf.float32)
     x1,y1,x2,y2 = [tf.squeeze(x, axis=1) for x in tf.split(boxes, [1,1,1,1], 1)]
     x1 = x1 / max_X
     y1 = y1 / max_Y
     x2 = x2 / max_X
     y2 = y2 / max_Y
-    return tf.stack([x1, y1, x2, y2], axis=1)
+    return tf.stack([y1, x1, y2, x2], axis=1)
 
 def shift_boxes (boxes, box_ind):
     assert FLAGS.batch == 1
@@ -202,10 +201,14 @@ def xxx_print (array):
     print(array)
     return np.zeros([1], dtype=np.float32)
 
-def mask_net (net):
-    net = slim.conv2d(net, 32, 3, 1, scope='masknet1', reuse=tf.AUTO_REUSE)
-    net = slim.conv2d(net, 32, 3, 1, scope='masknet2', reuse=tf.AUTO_REUSE)
-    net = slim.conv2d(net, 2, 3, 1, activation_fn=None, scope='masknet3', reuse=tf.AUTO_REUSE)
+def mask_net (X, mask_ft, boxes, box_ind):
+    nboxes = normalize_boxes(tf.shape(X), boxes)
+    net = tf.image.crop_and_resize(mask_ft, nboxes, box_ind, [FLAGS.mask_size, FLAGS.mask_size])
+
+    with slim.arg_scope([slim.conv2d], normalizer_fn=None):
+        net = slim.conv2d(net, 32, 3, 1, scope='masknet1', reuse=tf.AUTO_REUSE)
+        net = slim.conv2d(net, 32, 3, 1, scope='masknet2', reuse=tf.AUTO_REUSE)
+        net = slim.conv2d(net, 2, 3, 1, activation_fn=None, scope='masknet3', reuse=tf.AUTO_REUSE)
     return net
 
 def create_model (inputs, backbone_fn):
@@ -214,6 +217,7 @@ def create_model (inputs, backbone_fn):
     # gt_counts:    B                   number of boxes in each sample of the batch
     # gt_boxes:     ? * 4               boxes
     bb, _ = backbone_fn(inputs.X-PIXEL_MEANS, global_pool=False, output_stride=FLAGS.backbone_stride)
+    #bb2, _ = backbone_fn(inputs.X-PIXEL_MEANS, global_pool=False, output_stride=FLAGS.backbone_stride, scope='bb2')
 
     gt_matcher = cpp.GTMatcher(FLAGS.match_th, FLAGS.max_masks)
     mask_extractor = cpp.MaskExtractor(FLAGS.mask_size, FLAGS.mask_size)
@@ -230,6 +234,7 @@ def create_model (inputs, backbone_fn):
 
         assert FLAGS.backbone_stride % FLAGS.mask_stride == 0
         ss = FLAGS.backbone_stride // FLAGS.mask_stride
+
         mask_ft = slim.conv2d_transpose(bb, FLAGS.mask_filters, ss*2, ss)
 
         anchor_logits = slim.conv2d(anchor_logits_ft, 2 * len(PRIORS), 3, 1, activation_fn=None) 
@@ -275,8 +280,7 @@ def create_model (inputs, backbone_fn):
             boxes_predicted = tf.gather(boxes, psel)
             box_ind_predicted = tf.gather(box_ind, psel)
 
-            nboxes = normalize_boxes(tf.shape(inputs.X), boxes_predicted)
-            mlogits = mask_net(tf.image.crop_and_resize(mask_ft, nboxes, box_ind_predicted, [FLAGS.mask_size, FLAGS.mask_size]))
+            mlogits = mask_net(inputs.X, mask_ft, boxes_predicted, box_ind_predicted)
             masks_predicted = tf.squeeze(tf.slice(tf.nn.softmax(mlogits), [0, 0, 0, 1], [-1, -1, -1, 1]), 3)
             pass
 
@@ -295,18 +299,16 @@ def create_model (inputs, backbone_fn):
         box_ind = tf.gather(box_ind, index)
         gt_boxes = tf.gather(inputs.gt_boxes, gt_index)
 
-        # mask_ft
         # normalize boxes to [0-1]
         nboxes = normalize_boxes(tf.shape(inputs.X), boxes)
-        mask_ft = tf.image.crop_and_resize(mask_ft, nboxes, box_ind, [FLAGS.mask_size, FLAGS.mask_size])
-        mlogits = mask_net(mask_ft)
+        mlogits = mask_net(inputs.X, mask_ft, boxes, box_ind)
 
         gt_masks, = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, boxes], [tf.float32])
         #gt_masks, = tf.py_func(mask_extractor.apply, [inputs.gt_masks, gt_boxes, tf.slice(gt_boxes, [0, 3], [-1, 4])], [tf.float32])
-        end_points['gt_masks'] = gt_masks
         end_points['gt_boxes'] = gt_boxes
         end_points['boxes'] = boxes
         gt_masks = tf.cast(tf.round(gt_masks), tf.int32)
+        end_points['gt_masks'] = gt_masks
         # mask cross entropy
         mxe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=mlogits, labels=gt_masks)
         mxe = tf.reshape(mxe, (-1, ))
@@ -314,7 +316,7 @@ def create_model (inputs, backbone_fn):
 
     #tf.identity(logits, name='logits')
     #tf.identity(params, name='params')
-    tf.identity(boxes_pre, name='boxes_pre')
+    #tf.identity(boxes_pre, name='boxes_pre')
     tf.identity(boxes_predicted, name='boxes')
     tf.identity(masks_predicted, name='masks')
     #tf.identity(mlogits, name='mlogits')
@@ -327,7 +329,7 @@ def create_model (inputs, backbone_fn):
 
     loss = tf.identity(axe + mxe + pl + reg, name='lo')
 
-    return loss, [loss, axe, mxe, pl, reg, precision, recall], end_points
+    return loss, [axe, mxe, pl, reg, precision, recall], end_points
 
 def setup_finetune (ckpt, exclusions):
     print("Finetuning %s" % ckpt)
@@ -479,13 +481,22 @@ def main (_):
             progress = tqdm(range(epoch_steps), leave=False)
             for _ in progress:
                 sample = stream.next()
-                mm, _ = sess.run([metrics, train_op], feed_dict=inputs.feed_dict(sample, True))
+                mm, _, ccc = sess.run([metrics, train_op, end_points['gt_masks']], feed_dict=inputs.feed_dict(sample, True))
                 bs = sample[1].shape[0]
                 metrics_sum += np.array(mm) * bs
                 cnt += bs
                 metrics_txt = format_metrics(metrics_sum/cnt)
                 progress.set_description(metrics_txt)
                 step += 1
+
+                '''
+                if ccc.shape[0] > 5:
+                    gal = Gallery('ccc')
+                    for i in range(ccc.shape[0]):
+                        cv2.imwrite(gal.next(), ccc[i]*255)
+                    gal.flush()
+                    sys.exit(0)
+                '''
                 pass
             stop = time.time()
             msg = 'train e=%d s=%d ' % (epoch, step)
