@@ -52,43 +52,6 @@ class ShapeConfig:
         '''
     pass
 
-def create_net (ft1, ft2, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, config):
-    # ft:           B * H' * W' * 3     input feature, H' W' is feature map size
-    # gt_counts:    B                   number of boxes in each sample of the batch
-    # gt_boxes:     ? * 4               boxes
-    with tf.variable_scope('anchor_net'):
-
-        logits = config.predict_logits(ft1)     # B * H' * W' * (M * 2)
-        logits2 = tf.reshape(logits, (-1, 2))   # ? * 2
-
-        gt_anchors = tf.reshape(gt_anchors, (-1, ))
-        gt_anchors_weight = tf.reshape(gt_anchors_weight, (-1,))
-        xe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits2, labels=gt_anchors)
-        xe = xe * gt_anchors_weight
-        xe = tf.reduce_sum(xe) / (tf.reduce_sum(gt_anchors_weight) + 1)
-
-        params = config.predict_params(ft2)       # B * H' * W' * M * 4
-        params2 = tf.reshape(params, (-1, config.params))     # ? * 4
-        gt_params = tf.reshape(gt_params, (-1, config.params))
-        gt_params_weight = tf.reshape(gt_params_weight, (-1,))
-        pl = config.params_loss(params2, gt_params)
-        pl = pl * gt_params_weight
-        pl = tf.reduce_sum(pl) / (tf.reduce_sum(gt_params_weight) + 1)
-
-    logits= tf.identity(logits, name='logits')
-    #params = tf.identity(params, name='params')
-    if True:
-        dxy, wh = tf.split(params, [2,2], 3)
-        wh = tf.exp(wh) - 1
-        tf.identity(tf.concat([dxy, wh], 3), name='params')
-
-    xe = tf.identity(xe, name='xe') # cross-entropy
-    pl = tf.identity(pl * FLAGS.pl_weight, name='pl') # params-loss
-    reg = tf.identity(tf.reduce_sum(tf.losses.get_regularization_losses()) * FLAGS.re_weight, name='re')
-
-    loss = tf.identity(xe + pl + reg, name='lo')
-
-    return logits, params, loss, [loss, xe, pl, reg]
 
 def patch_arg_scopes ():
     def resnet_arg_scope (weight_decay=0.0001):
@@ -131,8 +94,8 @@ flags.DEFINE_integer('size', None, '')
 flags.DEFINE_integer('batch', 1, 'Batch size.  ')
 flags.DEFINE_integer('shift', 0, '')
 flags.DEFINE_integer('backbone_stride', 16, '')
-flags.DEFINE_integer('ft_filters', 128, '')
-flags.DEFINE_integer('ft_stride', 4, '')
+flags.DEFINE_integer('anchor_filters', 128, '')
+flags.DEFINE_integer('anchor_stride', 4, '')
 
 flags.DEFINE_string('backbone', 'resnet_v2_50', 'architecture')
 flags.DEFINE_string('model', None, 'model directory')
@@ -218,7 +181,7 @@ def create_picpac_stream (db_path, is_training):
               "colorspace": COLORSPACE,
               "transforms": augments + [
                   {"type": "clip", "round": FLAGS.backbone_stride},
-                  {"type": "anchors.dense." + FLAGS.shape, 'downsize': FLAGS.ft_stride},
+                  {"type": "anchors.dense." + FLAGS.shape, 'downsize': FLAGS.anchor_stride},
                   {"type": "rasterize"},
                   ]
              }
@@ -229,6 +192,126 @@ def create_picpac_stream (db_path, is_training):
     #    picpac_config['mixin_group_delta'] = 1
     #    pass
     return picpac.ImageStream(picpac_config)
+
+def tf_repeat(tensor, repeats):
+    """
+    Args:
+
+    input: A Tensor. 1-D or higher.
+    repeats: A list. Number of repeat for each dimension, length must be the same as the number of dimensions in input
+
+    Returns:
+    
+    A Tensor. Has the same type as input. Has the shape of tensor.shape * repeats
+    """
+    with tf.variable_scope("repeat"):
+        expanded_tensor = tf.expand_dims(tensor, -1)
+        multiples = [1] + repeats
+        tiled_tensor = tf.tile(expanded_tensor, multiples = multiples)
+        repeated_tesnor = tf.reshape(tiled_tensor, tf.shape(tensor) * repeats)
+    return repeated_tesnor
+
+def anchors2boxes (shape, anchor_params, priors):
+    # anchor parameters are: dx, dy, w, h
+    B = shape[0]
+    H = shape[1]
+    W = shape[2]
+    box_ind = tf_repeat(tf.range(B), [H * W * priors])
+    if True:    # generate array of box centers
+        x0 = tf.cast(tf.range(W) * FLAGS.anchor_stride, tf.float32)
+        y0 = tf.cast(tf.range(H) * FLAGS.anchor_stride, tf.float32)
+        x0, y0 = tf.meshgrid(x0, y0)
+        x0 = tf.reshape(x0, (-1,))
+        y0 = tf.reshape(y0, (-1,))
+        x0 = tf.tile(tf_repeat(x0, [priors]), [B])
+        y0 = tf.tile(tf_repeat(y0, [priors]), [B])
+    dx, dy, lw, lh = [tf.squeeze(x, axis=1) for x in tf.split(anchor_params, [1,1,1,1], 1)]
+
+    W = tf.cast(W * FLAGS.anchor_stride, tf.float32)
+    H = tf.cast(H * FLAGS.anchor_stride, tf.float32)
+
+    max_X = W-1
+    max_Y = H-1
+
+    w = tf.clip_by_value(tf.exp(lw)-1, 0, W)
+    h = tf.clip_by_value(tf.exp(lh)-1, 0, H)
+
+    x1 = x0 + dx - w/2
+    y1 = y0 + dy - h/2
+    x2 = x1 + w
+    y2 = y1 + h
+    x1 = tf.clip_by_value(x1, 0, max_X) 
+    y1 = tf.clip_by_value(y1, 0, max_Y)
+    x2 = tf.clip_by_value(x2, 0, max_X)
+    y2 = tf.clip_by_value(y2, 0, max_Y)
+
+    boxes = tf.stack([x1, y1, x2, y2], axis=1)
+    return boxes, box_ind
+
+def shift_boxes (boxes, box_ind):
+    assert FLAGS.batch == 1
+    return boxes
+
+def create_net (ft1, ft2, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, config):
+    # ft:           B * H' * W' * 3     input feature, H' W' is feature map size
+    # gt_counts:    B                   number of boxes in each sample of the batch
+    # gt_boxes:     ? * 4               boxes
+    with tf.variable_scope('anchor_net'):
+
+        logits = config.predict_logits(ft1)     # B * H' * W' * (M * 2)
+        logits2 = tf.reshape(logits, (-1, 2))   # ? * 2
+
+        gt_anchors = tf.reshape(gt_anchors, (-1, ))
+        gt_anchors_weight = tf.reshape(gt_anchors_weight, (-1,))
+        xe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits2, labels=gt_anchors)
+        xe = xe * gt_anchors_weight
+        xe = tf.reduce_sum(xe) / (tf.reduce_sum(gt_anchors_weight) + 1)
+
+        params = config.predict_params(ft2)       # B * H' * W' * M * 4
+        params2 = tf.reshape(params, (-1, config.params))     # ? * 4
+        gt_params = tf.reshape(gt_params, (-1, config.params))
+        gt_params_weight = tf.reshape(gt_params_weight, (-1,))
+        pl = config.params_loss(params2, gt_params)
+        pl = pl * gt_params_weight
+        pl = tf.reduce_sum(pl) / (tf.reduce_sum(gt_params_weight) + 1)
+
+    logits= tf.identity(logits, name='logits')
+    params = tf.identity(params, name='params')
+
+    xe = tf.identity(xe, name='xe') # cross-entropy
+    pl = tf.identity(pl * FLAGS.pl_weight, name='pl') # params-loss
+    reg = tf.identity(tf.reduce_sum(tf.losses.get_regularization_losses()) * FLAGS.re_weight, name='re')
+
+    loss = tf.identity(xe + pl + reg, name='lo')
+
+    if True:    # for prediction phase
+        anchor_th = tf.placeholder(tf.float32, shape=(), name="anchor_th")
+        nms_max = tf.placeholder(tf.int32, shape=(), name="nms_max")
+        nms_th = tf.placeholder(tf.float32, shape=(), name="nms_th")
+
+        prob = tf.squeeze(tf.slice(tf.nn.softmax(logits2), [0, 1], [-1, 1]), 1)
+        boxes, box_ind = anchors2boxes(tf.shape(ft2), params2, config.priors)
+
+        sel = tf.greater_equal(prob, anchor_th)
+        # sel is a boolean mask
+
+        # select only boxes with prob > th for nms
+        prob = tf.boolean_mask(prob, sel)
+        boxes = tf.boolean_mask(boxes, sel)
+        box_ind = tf.boolean_mask(box_ind, sel)
+
+        sel = tf.image.non_max_suppression(shift_boxes(boxes, box_ind), prob, nms_max, iou_threshold=nms_th)
+        # sel is a list of indices
+
+        prob = tf.gather(prob, sel)
+        boxes = tf.gather(boxes, sel)
+        box_ind = tf.gather(box_ind, sel)
+        tf.identity(prob, name='probs')
+        tf.identity(boxes, name='boxes')
+        tf.identity(box_ind, name='inds')
+
+    return logits, params, loss, [loss, xe, pl, reg]
+
 
 def main (_):
     global PIXEL_MEANS
@@ -279,11 +362,13 @@ def main (_):
          slim.arg_scope([slim.conv2d, slim.conv2d_transpose], weights_regularizer=slim.l2_regularizer(2.5e-4), normalizer_fn=slim.batch_norm, normalizer_params={'decay': 0.9, 'epsilon': 5e-4, 'scale': False, 'is_training':is_training}), \
          slim.arg_scope([slim.batch_norm], is_training=is_training):
         bb, _ = network_fn(X-PIXEL_MEANS, global_pool=False, output_stride=16)
-        assert FLAGS.backbone_stride % FLAGS.ft_stride == 0
-        ss = FLAGS.backbone_stride // FLAGS.ft_stride
-        ft1 = slim.conv2d_transpose(bb, FLAGS.ft_filters, ss*2, ss)
-        ft2 = slim.conv2d_transpose(bb, FLAGS.ft_filters, ss*2, ss) #, activation_fn=tf.nn.sigmoid)
+        assert FLAGS.backbone_stride % FLAGS.anchor_stride == 0
+        ss = FLAGS.backbone_stride // FLAGS.anchor_stride
+        ft1 = slim.conv2d_transpose(bb, FLAGS.anchor_filters, ss*2, ss)
+        ft2 = slim.conv2d_transpose(bb, FLAGS.anchor_filters, ss*2, ss) #, activation_fn=tf.nn.sigmoid)
         _, _, loss, metrics = create_net(ft1, ft2, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, shape_config)
+
+
 
     #network_fn = nets_factory.get_network_fn(FLAGS.backbone, num_classes=None,
     #            weight_decay=FLAGS.weight_decay, is_training=is_training)
