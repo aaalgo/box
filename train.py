@@ -160,7 +160,7 @@ def anchors2boxes (shape, anchor_params):
         y0 = tf.reshape(y0, (-1,))
         x0 = tf.tile(tf_repeat(x0, [len(PRIORS)]), [B])
         y0 = tf.tile(tf_repeat(y0, [len(PRIORS)]), [B])
-    dx, dy, w, h = [tf.squeeze(x, axis=1) for x in tf.split(anchor_params, [1,1,1,1], 1)]
+    dx, dy, lw, lh = [tf.squeeze(x, axis=1) for x in tf.split(anchor_params, [1,1,1,1], 1)]
 
     W = tf.cast(W * FLAGS.anchor_stride, tf.float32)
     H = tf.cast(H * FLAGS.anchor_stride, tf.float32)
@@ -168,8 +168,8 @@ def anchors2boxes (shape, anchor_params):
     max_X = W-1
     max_Y = H-1
 
-    w = tf.clip_by_value(w, 0, W)
-    h = tf.clip_by_value(h, 0, H)
+    w = tf.clip_by_value(tf.exp(lw)-1,w, 0, W)
+    h = tf.clip_by_value(tf.exp(lh)-1,h, 0, H)
 
     x1 = x0 + dx - w/2
     y1 = y0 + dy - h/2
@@ -255,10 +255,18 @@ def create_model (inputs, backbone_fn):
         gt_params = tf.reshape(inputs.gt_params, (-1, 4))
         gt_params_weight = tf.reshape(inputs.gt_params_weight, (-1,))
         # params loss
-        pl = params - gt_params
-        pl = pl * pl
-        pl = tf.reduce_sum(pl, axis=1) * gt_params_weight
-        pl = tf.reduce_sum(pl) / (tf.reduce_sum(gt_params_weight) + 1)
+        if True:
+            dxy, wh = tf.split(params, [2,2], 1)
+            dxy_gt, wh_gt = tf.split(gt_params, [2,2], 1)
+
+            #wh = tf.log(tf.nn.relu(wh) + 1)
+            wh_gt = tf.log(wh_gt + 1)
+
+            pl = tf.losses.huber_loss(dxy, dxy_gt, reduction=tf.losses.Reduction.NONE) + \
+                 tf.losses.huber_loss(wh, wh_gt, reduction=tf.losses.Reduction.NONE)
+            pl = tf.reduce_sum(pl, axis=1)
+
+        pl = tf.reduce_sum(pl * gt_params_weight) / (tf.reduce_sum(gt_params_weight) + 1)
 
         # generate boxes from anchor params
         boxes, box_ind = anchors2boxes(tf.shape(anchor_logits_ft), params)

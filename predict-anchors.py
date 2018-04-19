@@ -35,7 +35,7 @@ flags.DEFINE_string('input_db', None, '')
 flags.DEFINE_integer('stride', 16, '')
 
 flags.DEFINE_float('anchor_th', 0.5, '')
-flags.DEFINE_integer('nms_max', 200, '')
+flags.DEFINE_integer('nms_max', 10000, '')
 flags.DEFINE_float('nms_th', 0.2, '')
 flags.DEFINE_float('max', None, 'max images from db')
 
