@@ -38,8 +38,6 @@ class ShapeConfig:
 
         l1 = tf.losses.huber_loss(dxy, dxy_gt, reduction=tf.losses.Reduction.NONE)
         l2 = tf.losses.huber_loss(wh, wh_gt, reduction=tf.losses.Reduction.NONE)
-        print(tf.shape(l1), tf.shape(l2))
-        
         return tf.reduce_sum(l1+l2, axis=1)
 
         '''
@@ -89,6 +87,7 @@ flags.DEFINE_string('val_db', None, 'validation db')
 flags.DEFINE_integer('classes', 2, 'number of classes')
 flags.DEFINE_string('mixin', None, 'mix-in training db')
 flags.DEFINE_integer('channels', 3, 'image channels')
+flags.DEFINE_boolean('cache', True, '')
 
 flags.DEFINE_integer('size', None, '') 
 flags.DEFINE_integer('max_size', 2000, '') 
@@ -170,6 +169,7 @@ def create_picpac_stream (db_path, is_training):
     else:
         augments = []
 
+    print("CACHE:", FLAGS.cache)
     picpac_config = {"db": db_path,
               "loop": is_training,
               "shuffle": is_training,
@@ -180,6 +180,7 @@ def create_picpac_stream (db_path, is_training):
               "dtype": "float32",
               "batch": FLAGS.batch,
               "colorspace": COLORSPACE,
+              "cache": FLAGS.cache,
               "transforms": augments + [
                   {"type": "resize", "max_size": FLAGS.max_size},
                   {"type": "clip", "round": FLAGS.backbone_stride},

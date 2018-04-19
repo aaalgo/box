@@ -70,6 +70,8 @@ flags.DEFINE_string('db', None, 'training db')
 flags.DEFINE_string('val_db', None, 'validation db')
 flags.DEFINE_integer('classes', 2, 'number of classes')
 flags.DEFINE_string('mixin', None, 'mix-in training db')
+flags.DEFINE_integer('channels', 3, 'image channels')
+flags.DEFINE_boolean('cache', True, '')
 
 flags.DEFINE_integer('size', None, '') 
 flags.DEFINE_integer('batch', 1, 'Batch size.  ')
@@ -115,7 +117,7 @@ PRIORS = [1]    # placeholder
 
 class Inputs:
     def __init__ (self):
-        self.X = tf.placeholder(tf.float32, shape=(None, None, None, 3), name="images")
+        self.X = tf.placeholder(tf.float32, shape=(None, None, None, FLAGS.channels), name="images")
         self.anchor_th = tf.placeholder(tf.float32, shape=(), name="anchor_th")
         self.nms_max = tf.placeholder(tf.int32, shape=(), name="nms_max")
         self.nms_th = tf.placeholder(tf.float32, shape=(), name="nms_th")
@@ -389,11 +391,12 @@ def create_picpac_stream (db_path, is_training):
               "shuffle": is_training,
               "reshuffle": is_training,
               "annotate": True,
-              "channels": 3,
+              "channels": FLAGS.channels,
               "stratify": is_training,
               "dtype": "float32",
               "batch": FLAGS.batch,
               "colorspace": COLORSPACE,
+              "cache": FLAGS.cache,
               "transforms": augments + [
                   {"type": "clip", "round": FLAGS.backbone_stride},
                   {"type": "anchors.dense.box", 'downsize': FLAGS.anchor_stride},
@@ -424,6 +427,9 @@ def main (_):
         print_red("finetune, using RGB with vgg pixel means")
         COLORSPACE = 'RGB'
         PIXEL_MEANS = VGG_PIXEL_MEANS
+        if FLAGS.channels == 1:
+            print_red("finetune requires us turning channels from 1 to 3")
+        FLAGS.channels = 3
 
     inputs = Inputs()
 
