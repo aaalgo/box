@@ -24,22 +24,41 @@ class ShapeConfig:
         return slim.conv2d(ft, 2 * self.priors, 3, 1, activation_fn=None) 
 
     # these are just box deltas
-    def predict_params (self, ft):
-        return slim.conv2d(ft, self.params * self.priors, 3, 1, activation_fn=None)
+    def predict_params (self, net):
+        #net = slim.conv2d(ft, 64, 3, 1)
+        net = slim.conv2d(net, self.params * self.priors, 3, 1, activation_fn=None)
+        return net
 
     def params_loss (self, params, gt_params):
-        diff = params - gt_params
-        diff = diff * diff
-        return tf.reduce_sum(diff, axis=1)
+        dxy, wh = tf.split(params, [2,2], 1)
+        dxy_gt, wh_gt = tf.split(gt_params, [2,2], 1)
+
+        #wh = tf.log(tf.nn.relu(wh) + 1)
+        wh_gt = tf.log(wh_gt + 1)
+
+        l1 = tf.losses.huber_loss(dxy, dxy_gt, reduction=tf.losses.Reduction.NONE)
+        l2 = tf.losses.huber_loss(wh, wh_gt, reduction=tf.losses.Reduction.NONE)
+        print(tf.shape(l1), tf.shape(l2))
+        
+        return tf.reduce_sum(l1+l2, axis=1)
+
+        '''
+        d1 = dxy - dxy_gt
+        d1 = d1 * d1
+
+        d2 = wh - wh_gt
+        d2 = d2 * d2
+        return tf.reduce_sum(d1, axis=1) + tf.reduce_sum(d2, axis=1)
+        '''
     pass
 
-def create_net (ft, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, config):
+def create_net (ft1, ft2, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, config):
     # ft:           B * H' * W' * 3     input feature, H' W' is feature map size
     # gt_counts:    B                   number of boxes in each sample of the batch
     # gt_boxes:     ? * 4               boxes
     with tf.variable_scope('anchor_net'):
 
-        logits = config.predict_logits(ft)     # B * H' * W' * (M * 2)
+        logits = config.predict_logits(ft1)     # B * H' * W' * (M * 2)
         logits2 = tf.reshape(logits, (-1, 2))   # ? * 2
 
         gt_anchors = tf.reshape(gt_anchors, (-1, ))
@@ -48,7 +67,7 @@ def create_net (ft, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, 
         xe = xe * gt_anchors_weight
         xe = tf.reduce_sum(xe) / (tf.reduce_sum(gt_anchors_weight) + 1)
 
-        params = config.predict_params(ft)       # B * H' * W' * M * 4
+        params = config.predict_params(ft2)       # B * H' * W' * M * 4
         params2 = tf.reshape(params, (-1, config.params))     # ? * 4
         gt_params = tf.reshape(gt_params, (-1, config.params))
         gt_params_weight = tf.reshape(gt_params_weight, (-1,))
@@ -57,7 +76,12 @@ def create_net (ft, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, 
         pl = tf.reduce_sum(pl) / (tf.reduce_sum(gt_params_weight) + 1)
 
     logits= tf.identity(logits, name='logits')
-    params = tf.identity(params, name='params')
+    #params = tf.identity(params, name='params')
+    if True:
+        dxy, wh = tf.split(params, [2,2], 3)
+        wh = tf.exp(wh) - 1
+        tf.identity(tf.concat([dxy, wh], 3), name='params')
+
     xe = tf.identity(xe, name='xe') # cross-entropy
     pl = tf.identity(pl * FLAGS.pl_weight, name='pl') # params-loss
     reg = tf.identity(tf.reduce_sum(tf.losses.get_regularization_losses()) * FLAGS.re_weight, name='re')
@@ -101,12 +125,13 @@ flags.DEFINE_string('db', None, 'training db')
 flags.DEFINE_string('val_db', None, 'validation db')
 flags.DEFINE_integer('classes', 2, 'number of classes')
 flags.DEFINE_string('mixin', None, 'mix-in training db')
+flags.DEFINE_integer('channels', 3, 'image channels')
 
 flags.DEFINE_integer('size', None, '') 
 flags.DEFINE_integer('batch', 1, 'Batch size.  ')
 flags.DEFINE_integer('shift', 0, '')
 flags.DEFINE_integer('backbone_stride', 16, '')
-flags.DEFINE_integer('ft_filters', 256, '')
+flags.DEFINE_integer('ft_filters', 128, '')
 flags.DEFINE_integer('ft_stride', 4, '')
 
 flags.DEFINE_string('backbone', 'resnet_v2_50', 'architecture')
@@ -130,7 +155,7 @@ flags.DEFINE_boolean('adam', False, '')
 flags.DEFINE_float('pl_weight', 1.0/50, '')
 flags.DEFINE_float('re_weight', 0.1, '')
 
-flags.DEFINE_string('shape', 'circle', '')
+flags.DEFINE_string('shape', 'box', '')
 
 COLORSPACE = 'BGR'
 PIXEL_MEANS = tf.constant([[[[127.0, 127.0, 127.0]]]])
@@ -186,7 +211,7 @@ def create_picpac_stream (db_path, is_training):
               "shuffle": is_training,
               "reshuffle": is_training,
               "annotate": True,
-              "channels": 3,
+              "channels": FLAGS.channels,
               "stratify": is_training,
               "dtype": "float32",
               "batch": FLAGS.batch,
@@ -219,6 +244,9 @@ def main (_):
     if FLAGS.finetune:
         print_red("finetune, using RGB with vgg pixel means")
         COLORSPACE = 'RGB'
+        if FLAGS.channels == 1:
+            print_red("finetune requires us turning channels from 1 to 3")
+        FLAGS.channels = 3
         PIXEL_MEANS = VGG_PIXEL_MEANS
 
     if FLAGS.shape == 'circle':
@@ -226,7 +254,7 @@ def main (_):
     elif FLAGS.shape == 'box':
         shape_config = ShapeConfig(4)
 
-    X = tf.placeholder(tf.float32, shape=(None, None, None, 3), name="images")
+    X = tf.placeholder(tf.float32, shape=(None, None, None, FLAGS.channels), name="images")
     # ground truth labels
     gt_anchors = tf.placeholder(tf.int32, shape=(None, None, None, shape_config.priors))
     gt_anchors_weight = tf.placeholder(tf.float32, shape=(None, None, None, shape_config.priors))
@@ -253,8 +281,9 @@ def main (_):
         bb, _ = network_fn(X-PIXEL_MEANS, global_pool=False, output_stride=16)
         assert FLAGS.backbone_stride % FLAGS.ft_stride == 0
         ss = FLAGS.backbone_stride // FLAGS.ft_stride
-        ft = slim.conv2d_transpose(bb, FLAGS.ft_filters, ss*2, ss)
-        _, _, loss, metrics = create_net(ft, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, shape_config)
+        ft1 = slim.conv2d_transpose(bb, FLAGS.ft_filters, ss*2, ss)
+        ft2 = slim.conv2d_transpose(bb, FLAGS.ft_filters, ss*2, ss) #, activation_fn=tf.nn.sigmoid)
+        _, _, loss, metrics = create_net(ft1, ft2, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, shape_config)
 
     #network_fn = nets_factory.get_network_fn(FLAGS.backbone, num_classes=None,
     #            weight_decay=FLAGS.weight_decay, is_training=is_training)
