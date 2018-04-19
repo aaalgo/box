@@ -91,6 +91,7 @@ flags.DEFINE_string('mixin', None, 'mix-in training db')
 flags.DEFINE_integer('channels', 3, 'image channels')
 
 flags.DEFINE_integer('size', None, '') 
+flags.DEFINE_integer('max_size', 2000, '') 
 flags.DEFINE_integer('batch', 1, 'Batch size.  ')
 flags.DEFINE_integer('shift', 0, '')
 flags.DEFINE_integer('backbone_stride', 16, '')
@@ -180,6 +181,7 @@ def create_picpac_stream (db_path, is_training):
               "batch": FLAGS.batch,
               "colorspace": COLORSPACE,
               "transforms": augments + [
+                  {"type": "resize", "max_size": FLAGS.max_size},
                   {"type": "clip", "round": FLAGS.backbone_stride},
                   {"type": "anchors.dense." + FLAGS.shape, 'downsize': FLAGS.anchor_stride},
                   {"type": "rasterize"},
