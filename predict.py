@@ -77,7 +77,7 @@ def save_prediction_image (path, image, boxes, masks):
 
 def main (_):
     assert os.path.exists(FLAGS.input)
-    X = tf.placeholder(tf.float32, shape=(None, None, None, 3), name="images")
+    X = tf.placeholder(tf.float32, shape=(None, None, None, FLAGS.channels), name="images")
     is_training = tf.placeholder(tf.bool, name="is_training")
     anchor_th = tf.constant(FLAGS.anchor_th, tf.float32)
     nms_max = tf.constant(FLAGS.nms_max, tf.int32)
