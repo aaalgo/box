@@ -169,8 +169,8 @@ def anchors2boxes (shape, anchor_params):
     max_X = W-1
     max_Y = H-1
 
-    w = tf.clip_by_value(tf.exp(lw)-1,w, 0, W)
-    h = tf.clip_by_value(tf.exp(lh)-1,h, 0, H)
+    w = tf.clip_by_value(tf.exp(lw)-1, 0, W)
+    h = tf.clip_by_value(tf.exp(lh)-1, 0, H)
 
     x1 = x0 + dx - w/2
     y1 = y0 + dy - h/2
