@@ -404,11 +404,11 @@ def create_picpac_stream (db_path, is_training):
                   ]
              }
     if is_training and not FLAGS.mixin is None:
-        print("mixin support is incomplete in new picpac.")
-    #    assert os.path.exists(FLAGS.mixin)
-    #    picpac_config['mixin'] = FLAGS.mixin
-    #    picpac_config['mixin_group_delta'] = 1
-    #    pass
+        #print("mixin support is incomplete in new picpac.")
+        assert os.path.exists(FLAGS.mixin)
+        picpac_config['mixin'] = FLAGS.mixin
+        picpac_config['mixin_group_reset'] = 0
+        picpac_config['mixin_group_delta'] = 1
     return picpac.ImageStream(picpac_config)
 
 def main (_):
