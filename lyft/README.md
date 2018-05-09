@@ -13,7 +13,7 @@ python3 setup.py build
 ```
 
 Get PicPac binary (only works for ubuntu 16.04, otherwise clone
-https://github.com/aaalgo/picpac and run python3 setup.py build inside
+https://github.com/aaalgo/picpac and run `python3 setup.py build` inside
 to produce the so file)
 ```
 wget http://www.aaalgo.com/picpac/binary/picpac.cpython-35m-x86_64-linux-gnu.so
@@ -44,4 +44,6 @@ Notes:
 
 # Training
 
-
+```
+./train.sh
+```
