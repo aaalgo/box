@@ -12,6 +12,7 @@ import tensorflow as tf
 import tensorflow.contrib.slim as slim
 from nets import nets_factory, resnet_utils 
 import picpac
+print(picpac.__file__)
 
 class ShapeConfig:
     def __init__ (self, params=3, priors=1):

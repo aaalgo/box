@@ -3,13 +3,14 @@ import os
 import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 sys.path.append(os.path.join(os.path.abspath(os.path.dirname(__file__)), 'models/research/slim'))
-sys.path.insert(0, 'build/lib.linux-x86_64-3.5')
+sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), 'build/lib.linux-x86_64-3.5'))
 import time
 import datetime
 import logging
 from tqdm import tqdm
 import numpy as np
 import cv2
+import simplejson as json
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
 from nets import nets_factory, resnet_utils 
@@ -71,6 +72,7 @@ flags.DEFINE_integer('classes', 2, 'number of classes')
 flags.DEFINE_string('mixin', None, 'mix-in training db')
 flags.DEFINE_integer('channels', 3, 'image channels')
 flags.DEFINE_boolean('cache', True, '')
+flags.DEFINE_string('augments', None, 'augment config file')
 
 flags.DEFINE_integer('size', None, '') 
 flags.DEFINE_integer('batch', 1, 'Batch size.  ')
@@ -376,7 +378,13 @@ def create_picpac_stream (db_path, is_training):
     assert os.path.exists(db_path)
     augments = []
     if is_training:
-        augments = [
+        if FLAGS.augments:
+            with open(FLAGS.augments, 'r') as f:
+                augments = json.loads(f.read())
+            print("Using augments:")
+            print(json.dumps(augments))
+        else:
+            augments = [
                   #{"type": "augment.flip", "horizontal": True, "vertical": False},
                   {"type": "augment.rotate", "min":-10, "max":10},
                   {"type": "augment.scale", "min":0.9, "max":1.1},
