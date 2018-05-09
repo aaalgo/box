@@ -48,3 +48,8 @@ Notes:
 ```
 ./train.sh
 ```
+
+# Inference
+```
+../predict.py --model model/100 --input data/Train/CameraRGB/232.png
+```

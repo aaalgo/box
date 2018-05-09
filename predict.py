@@ -2,13 +2,14 @@
 import os
 import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-sys.path.insert(0, 'build/lib.linux-x86_64-3.5')
-sys.path.insert(0, '../picpac/build/lib.linux-x86_64-3.5')
+sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), 'build/lib.linux-x86_64-3.5'))
 import time
 from tqdm import tqdm
 import numpy as np
 import cv2
 from skimage import measure
+import imageio
+import subprocess as sp
 # RESNET: import these for slim version of resnet
 import tensorflow as tf
 from tensorflow.python.framework import meta_graph
@@ -36,11 +37,13 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string('model', None, '')
 flags.DEFINE_string('input', None, '')
+flags.DEFINE_string('output', 'output.gif', '')
 flags.DEFINE_float('anchor_th', 0.5, '')
 flags.DEFINE_integer('nms_max', 200, '')
 flags.DEFINE_float('nms_th', 0.2, '')
 flags.DEFINE_integer('stride', 16, '')
 flags.DEFINE_string('shape', 'Circle', '')
+flags.DEFINE_integer('channels', 3, '')
 
 tableau20 = [(180, 119, 31), (232, 199, 174), (14, 127, 255), (120, 187, 255),
 			 (44, 160, 44), (138, 223, 152), (40, 39, 214), (150, 152, 255),
@@ -53,24 +56,26 @@ def save_prediction_image (path, image, boxes, masks):
     image = image.astype(np.uint8)
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     images.append(rgb)
-    vis = np.zeros_like(rgb, dtype=np.uint8)
+    #vis = np.zeros_like(rgb, dtype=np.uint8)
+    vis = np.copy(rgb).astype(np.float32)
 
     boxes = np.round(boxes).astype(np.int32)
 
     for i in range(boxes.shape[0]):
         x1, y1, x2, y2 = boxes[i]
         cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0))
+        patch = vis[y1:(y2+1), x1:(x2+1), :]
 
         mask = cv2.resize(masks[i], (x2-x1+1, y2-y1+1))
         view = vis[y1:(y2+1), x1:(x2+1)]
         b, g, r = tableau20[i % len(tableau20)]
-        vis[:, :, 0][mask > 0.5] = 0
-        vis[:, :, 1][mask > 0.5] = 0
-        vis[:, :, 2][mask > 0.5] = 0
-        vis[:, :, 0] += b * mask
-        vis[:, :, 1] += g * mask
-        vis[:, :, 2] += r * mask
-    images.append(vis)
+        patch[:, :, 0][mask > 0.5] = 0
+        patch[:, :, 1][mask > 0.5] = 0
+        patch[:, :, 2][mask > 0.5] = 0
+        patch[:, :, 0] += b * mask
+        patch[:, :, 1] += g * mask
+        patch[:, :, 2] += r * mask
+    images.append(np.clip(vis, 0, 255).astype(np.uint8))
     imageio.mimsave(path + '.gif', images, duration = 1)
     sp.check_call('gifsicle --colors 256 -O3 < %s.gif > %s; rm %s.gif' % (path, path, path), shell=True)
     pass
@@ -94,7 +99,8 @@ def main (_):
         image = image[:H, :W, :]
         batch = np.expand_dims(image, axis=0).astype(dtype=np.float32)
         boxes, masks = sess.run([model.boxes, model.masks], feed_dict={X: batch, is_training: False})
-        save_prediction_image(FLAGS.input + '.prob.png', image, boxes, masks)
+        print(boxes)
+        save_prediction_image(FLAGS.output, image, boxes, masks)
     pass
 
 if __name__ == '__main__':
