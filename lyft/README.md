@@ -33,6 +33,7 @@ Create a directory or symbolic `box/cityscape/scratch`, which should be a direct
 # Importing
 
 ```
+cd lyft
 ./import.py
 ```
 
