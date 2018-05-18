@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from skimage import measure
 import scipy
-from gcolor import *
+from utils import *
 from lyft import *
 
 json.encoder.FLOAT_REPR = lambda f: ("%.3f" % f)
