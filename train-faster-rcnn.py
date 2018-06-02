@@ -3,10 +3,11 @@ import errno
 import os
 import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+# git clone https://github.com/tensorflow/models
 sys.path.append(os.path.join(os.path.abspath(os.path.dirname(__file__)), 'models/research/slim'))
+# C++ code, python3 setup.py build
 sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), 'build/lib.linux-x86_64-3.5'))
-import time
-import datetime
+import time, datetime
 import logging
 import simplejson as json
 from tqdm import tqdm
@@ -14,8 +15,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
 from nets import nets_factory, resnet_utils 
-import picpac
-import cpp
+import picpac, cpp
 print(picpac.__file__)
 
 flags = tf.app.flags
@@ -80,7 +80,7 @@ def create_picpac_stream (db_path, is_training):
 
     print("CACHE:", FLAGS.cache)
     statinfo = os.stat(db_path)
-    if statinfo.st_size > 0x40000000 and not FLAGS.cache:
+    if statinfo.st_size > 0x40000000 and FLAGS.cache:
         print_red("DB is probably too big too be cached, consider adding --cache 0")
         
     picpac_config = {"db": db_path,
@@ -123,7 +123,7 @@ def anchors2boxes (shape, anchor_params, priors):
     B = shape[0]
     H = shape[1]
     W = shape[2]
-    box_ind = tf_repeat(tf.range(B), [H * W * priors])
+    offset = tf_repeat(tf.range(B), [H * W * priors])
     if True:    # generate array of box centers
         x0 = tf.cast(tf.range(W) * FLAGS.anchor_stride, tf.float32)
         y0 = tf.cast(tf.range(H) * FLAGS.anchor_stride, tf.float32)
@@ -153,22 +153,16 @@ def anchors2boxes (shape, anchor_params, priors):
     y2 = tf.clip_by_value(y2, 0, max_Y)
 
     boxes = tf.stack([x1, y1, x2, y2], axis=1)
-    return boxes, box_ind
+    return boxes, offset
 
 def transform_bbox (roi, gt_box):
-    x1 = roi[:, 0]
-    y1 = roi[:, 1]
-    x2 = roi[:, 2]
-    y2 = roi[:, 3]
+    x1,y1,x2,y2 = [tf.squeeze(x, axis=1) for x in tf.split(roi, [1,1,1,1], 1)]
     w = x2 - x1 + 1
     h = y2 - y1 + 1
     cx = x1 + 0.5 * w
     cy = y1 + 0.5 * h
 
-    X1 = gt_box[:, 0]
-    Y1 = gt_box[:, 1]
-    X2 = gt_box[:, 2]
-    Y2 = gt_box[:, 3]
+    X1,Y1,X2,Y2 = [tf.squeeze(x, axis=1) for x in tf.split(gt_box, [1,1,1,1], 1)]
     W = X2 - X1 + 1
     H = Y2 - Y1 + 1
     CX = X1 + 0.5 * W
@@ -182,10 +176,7 @@ def transform_bbox (roi, gt_box):
     return tf.stack([dx, dy, dw, dh], axis=1)
 
 def refine_bbox (roi, params):
-    x1 = roi[:, 0]
-    y1 = roi[:, 1]
-    x2 = roi[:, 2]
-    y2 = roi[:, 3]
+    x1,y1,x2,y2 = [tf.squeeze(x, axis=1) for x in tf.split(roi, [1,1,1,1], 1)]
     w = x2 - x1 + 1
     h = y2 - y1 + 1
     cx = x1 + 0.5 * w
@@ -213,7 +204,7 @@ def normalize_boxes (shape, boxes):
     y2 = y2 / max_Y
     return tf.stack([y1, x1, y2, x2], axis=1)
 
-def shift_boxes (boxes, box_ind):
+def shift_boxes (boxes, offset):
     assert FLAGS.batch == 1
     return boxes
 
@@ -233,6 +224,11 @@ class FasterRCNN:
 
     def feed_dict (self, record, is_training = True):
         _, images, _, gt_anchors, gt_anchors_weight, gt_params, gt_params_weight, gt_boxes = record
+        assert np.all(gt_anchors < 2)
+        gt_boxes = np.reshape(gt_boxes, [-1, 7])
+        if len(gt_boxes.shape) > 1:
+            assert np.all(gt_boxes[:, 1] < FLAGS.classes)
+            assert np.all(gt_boxes[:, 1] > 0)
         return {self.is_training: is_training,
                 self.anchor_th: FLAGS.anchor_th,
                 self.nms_max: FLAGS.nms_max,
@@ -258,7 +254,7 @@ class FasterRCNN:
             self.gt_anchors_weight = tf.placeholder(tf.float32, shape=(None, None, None, self.priors))
             self.gt_params = tf.placeholder(tf.float32, shape=(None, None, None, self.priors * 4))
             self.gt_params_weight = tf.placeholder(tf.float32, shape=(None, None, None, self.priors))
-            self.gt_boxes = tf.placeholder(tf.float32, shape=(None, None))
+            self.gt_boxes = tf.placeholder(tf.float32, shape=(None, 7))
 
             self.losses = []
             self.metrics = []
@@ -289,10 +285,11 @@ class FasterRCNN:
             gt_anchors = tf.reshape(self.gt_anchors, (-1, ))
             gt_anchors_weight = tf.reshape(self.gt_anchors_weight, (-1,))
 
+            logits = tf.check_numerics(logits, 'logits')
             xe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=gt_anchors)
             xe = xe * gt_anchors_weight
             xe = tf.reduce_sum(xe) / (tf.reduce_sum(gt_anchors_weight) + 1)
-            xe = tf.identity(xe, name='x1')    # rpn xe
+            xe = tf.check_numerics(xe, 'x1', name='x1')    # rpn xe
 
             self.losses.append(xe)
             self.metrics.append(xe)
@@ -302,53 +299,48 @@ class FasterRCNN:
             gt_params = tf.reshape(self.gt_params, (-1, 4))
             gt_params_weight = tf.reshape(self.gt_params_weight, (-1,))
 
+            params = tf.check_numerics(params, 'params')
+            gt_params = tf.check_numerics(gt_params, 'gt_params')
+            gt_params_weight = tf.check_numerics(gt_params_weight, 'gt_params_weight')
             pl = params_loss(params, gt_params) * gt_params_weight
             pl = tf.reduce_sum(pl) / (tf.reduce_sum(gt_params_weight) + 1)
-            pl = tf.identity(pl * FLAGS.pl_weight1, name='p1') # params-loss
+            pl = tf.check_numerics(pl * FLAGS.pl_weight1, 'p1', name='p1') # params-loss
 
             self.losses.append(pl)
             self.metrics.append(pl)
 
             prob = tf.squeeze(tf.slice(tf.nn.softmax(logits), [0, 1], [-1, 1]), 1)
-            boxes, box_ind = anchors2boxes(tf.shape(rpn), params, self.priors)
-
+            boxes, offset = anchors2boxes(tf.shape(rpn), params, self.priors)
 
             with tf.device('/cpu:0'):
+                # fuck tensorflow, these lines fail on GPU
+
+                # pre-filtering by threshold so we put less stress on non_max_suppression
                 sel = tf.greater_equal(prob, self.anchor_th)
                 # sel is a boolean mask
 
                 # select only boxes with prob > th for nms
                 prob = tf.boolean_mask(prob, sel)
+                #params = tf.boolean_mask(params, sel)
                 boxes = tf.boolean_mask(boxes, sel)
-                box_ind = tf.boolean_mask(box_ind, sel)
+                # offset is offset within minibatch
+                offset = tf.boolean_mask(offset, sel)
 
-            sel = tf.image.non_max_suppression(shift_boxes(boxes, box_ind), prob, self.nms_max, iou_threshold=self.nms_th)
+            sel = tf.image.non_max_suppression(shift_boxes(boxes, offset), prob, self.nms_max, iou_threshold=self.nms_th)
             # sel is a list of indices
             prob = tf.gather(prob, sel)
             boxes = tf.gather(boxes, sel)
-            box_ind = tf.gather(box_ind, sel)
-
-            
-            hit, index, gt_index = tf.py_func(self.gt_matcher.apply, [boxes, box_ind, self.gt_boxes], [tf.float32, tf.int32, tf.int32])
-            #shape = tf.stack([hit, 4])
-
-            prob = tf.cond(self.is_training, lambda: tf.gather(prob, index), lambda: prob)
-            matched_boxes = tf.gather(boxes, index)
-            #matched_boxes.set_shape(shape)
-            boxes = tf.cond(self.is_training, lambda: matched_boxes, lambda: boxes)
-            box_ind = tf.cond(self.is_training, lambda: tf.gather(box_ind, index), lambda: box_ind)
-            matched_gt_boxes = tf.gather(self.gt_boxes, gt_index)
-            #matched_gt_boxes.set_shape(shape)
-            gt_boxes = tf.cond(self.is_training, lambda: matched_gt_boxes, lambda: self.gt_boxes)
+            offset = tf.gather(offset, sel)
 
             self.rpn_prob = tf.identity(prob, name='rpn_prob')
-            self.rpn_boxes = tf.identity(tf.reshape(boxes, [-1, 4]), name='rpn_boxes')
-            self.rpn_ind = tf.identity(prob, name='rpn_ind')
-            self.matched_gt_boxes = tf.reshape(gt_boxes, [-1, 7])
+            self.rpn_boxes = tf.identity(boxes, name='rpn_boxes')
+            self.offset = tf.identity(offset, name='offset')
+
+            hit, self.rpn_hits, self.gt_hits = tf.py_func(self.gt_matcher.apply, [boxes, offset, self.gt_boxes], [tf.float32, tf.int32, tf.int32])
 
             # % boxes found
-            precision = hit / tf.cast(tf.shape(boxes)[0] + 1, tf.float32);
-            recall = hit / tf.cast(tf.shape(self.gt_boxes)[0] + 1, tf.float32);
+            precision = hit / (tf.cast(tf.shape(boxes)[0], tf.float32) + 0.001);
+            recall = hit / (tf.cast(tf.shape(self.gt_boxes)[0], tf.float32) + 0.001);
             self.metrics.append(tf.identity(precision, name='p'))
             self.metrics.append(tf.identity(recall, name='r'))
 
@@ -357,7 +349,7 @@ class FasterRCNN:
             boxes = normalize_boxes(tf.shape(self.images), self.rpn_boxes)
 
             mask_size = FLAGS.pooling_size * 2
-            net = tf.image.crop_and_resize(self.backbone, boxes, box_ind, [mask_size, mask_size])
+            net = tf.image.crop_and_resize(self.backbone, boxes, offset, [mask_size, mask_size])
             net = slim.max_pool2d(net, [2,2], padding='SAME')
             #
             net = tf.reshape(net, [-1, FLAGS.pooling_size * FLAGS.pooling_size * FLAGS.features])
@@ -369,37 +361,48 @@ class FasterRCNN:
 
             logits = slim.fully_connected(net, FLAGS.classes, activation_fn=None)
             prob = tf.nn.softmax(logits)
-            self.prob = tf.identity(prob, name='prob')
+            # class probabilities
+            tf.identity(prob, name='prob')
 
-            matched_gt_labels = tf.cast(tf.squeeze(tf.slice(self.matched_gt_boxes, [0, 1], [-1, 1]), axis=1), tf.int32)
-            matched_gt_boxes = transform_bbox(self.rpn_boxes, tf.slice(self.matched_gt_boxes, [0, 3], [-1, 4]))
-
-            n = tf.cast(tf.shape(matched_gt_boxes)[0], tf.float32);
-
-            xe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=matched_gt_labels)
-            xe = tf.identity(tf.reduce_sum(xe)/(n + 1), name='x2')
-            self.losses.append(xe)
-            self.metrics.append(xe)
+            cls = tf.argmax(logits, axis=1)
+            # class prediction
+            tf.identity(cls, name='cls')
 
             params = slim.fully_connected(net, FLAGS.classes * 4, activation_fn=None)
             params = tf.reshape(params, [-1, FLAGS.classes, 4])
 
-            cls_pred = tf.argmax(logits, axis=1)
-            self.pred = tf.identity(cls_pred, name='cls')
-            onehot_label = tf.cond(self.is_training, lambda: tf.cast(matched_gt_labels, tf.int32), lambda: tf.cast(cls_pred, tf.int32))
+            if True:    # for inference stage
+                tf.identity(params, name='params')
+                onehot = tf.expand_dims(tf.one_hot(tf.cast(cls, tf.int32), depth=FLAGS.classes, on_value=1.0, off_value=0.0), axis=2)
+                params1 = tf.reduce_sum(params * onehot, axis=1)
+                boxes = refine_bbox(self.rpn_boxes, params1)
+                tf.identity(boxes, name='boxes')
 
-            onehot = tf.expand_dims(tf.one_hot(onehot_label, FLAGS.classes, on_value=1.0, off_value=0.0), axis=2)
+            rpn_boxes = tf.gather(self.rpn_boxes, self.rpn_hits)
+            logits = tf.gather(logits, self.rpn_hits)
+            params = tf.gather(params, self.rpn_hits)
 
+            matched_gt_boxes = tf.gather(self.gt_boxes, self.gt_hits)
+            matched_gt_labels = tf.cast(tf.squeeze(tf.slice(matched_gt_boxes, [0, 1], [-1, 1]), axis=1), tf.int32)
+            matched_gt_boxes = transform_bbox(rpn_boxes, tf.slice(matched_gt_boxes, [0, 3], [-1, 4]))
+
+            onehot = tf.expand_dims(tf.one_hot(matched_gt_labels, depth=FLAGS.classes, on_value=1.0, off_value=0.0), axis=2)
             params = tf.reduce_sum(params * onehot, axis=1)
 
-            boxes = refine_bbox(self.rpn_boxes, params)
-            self.boxes = tf.identity(boxes, name='boxes')
+            n = tf.cast(tf.shape(matched_gt_boxes)[0], tf.float32);
+
+            '''
+            xe = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=matched_gt_labels)
+            xe = tf.check_numerics(tf.reduce_sum(xe)/(n + 1), 'x2', name='x2')
+            self.losses.append(xe)
+            self.metrics.append(xe)
 
             pl = params_loss(params, matched_gt_boxes) 
             pl = tf.reduce_sum(pl) / (n + 1)
-            pl = tf.identity(pl * FLAGS.pl_weight2, name='p2') # params-loss
+            pl = tf.check_numerics(pl * FLAGS.pl_weight2, 'p2', name='p2') # params-loss
             self.losses.append(pl)
             self.metrics.append(pl)
+            '''
 
         if True:    # setup losses
             #reg = tf.identity(tf.reduce_sum(tf.losses.get_regularization_losses()) * FLAGS.re_weight, name='re')
@@ -486,7 +489,13 @@ def main (_):
             progress = tqdm(range(epoch_steps), leave=False)
             for _ in progress:
                 record = stream.next()
-                mm, _ = sess.run([model.metrics, train_op], feed_dict=model.feed_dict(record, True))
+                try:
+                    mm, _ = sess.run([model.metrics, train_op], feed_dict=model.feed_dict(record, True))
+                except:
+                    np.set_printoptions(precision=3)
+                    print(record[0].ids)
+                    print(record[7])
+                    raise
                 metrics_txt = metrics.update(mm, record[1].shape[0])
                 progress.set_description(metrics_txt)
                 step += 1
